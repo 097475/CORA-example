@@ -21,3 +21,4 @@ def test_seq_AReLU(intv_arr, expected_intv_arr):
                                                                                               [iv.mpf([-5.1, -4.9]), iv.mpf([5.9, 6.1])]]))])
 def test_tensor_to_intv(t, d, m):
     np.testing.assert_array_equal(abstract(t, d), m)
+

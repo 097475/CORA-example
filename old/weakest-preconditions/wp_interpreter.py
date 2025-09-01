@@ -37,7 +37,7 @@ class WPInterpreter(Interpreter):
         wp = self.post
         formula = Implies(self.pre, wp)
         print("Formula generated")
-        print(formula)
+        # print(formula)
         s = Solver()
         s.add(Not(formula))
         r = s.check()
@@ -48,7 +48,7 @@ class WPInterpreter(Interpreter):
             print(s.model())
         else:
             print("counterexample")
-            print(s.model())
+            # print(s.model())
             m = s.model()
 
             # generate the counterexample
@@ -65,7 +65,7 @@ class WPInterpreter(Interpreter):
         pre_op, pre_n_node_labels = psi(self.array_ref, self.n_nodes, self.n_node_features)
         self.post = substitute(self.post, [(self.array_ref[i][j], pre_op[i][j]) for j in range(self.n_node_features) for i in range(self.n_nodes)])
         self.n_node_features = pre_n_node_labels
-        print(op)
+        # print(op)
 
 
     @visit_children_decor
@@ -86,7 +86,7 @@ class WPInterpreter(Interpreter):
         embeddings = {node: sigma(msgs, self.array_ref[node], self.n_node_features)[0] for node, msgs in messages.items()}
         self.post = substitute(self.post, [(self.array_ref[i][j], embeddings[i][j]) for j in range(self.n_node_features) for i in range(self.n_nodes)])
         self.n_node_features = sigma(messages[0], 0, self.n_node_features)[1]
-        print('preimage')
+        # print('preimage')
 
 
     @v_args(inline=True)

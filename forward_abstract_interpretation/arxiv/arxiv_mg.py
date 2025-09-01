@@ -8,13 +8,15 @@ from tensorflow.keras.optimizers import Adam
 
 from spektral.datasets.ogb import OGB
 from spektral.layers import GCNConv
-from spektral.transforms import AdjToSpTensor, GCNFilter
+from spektral.transforms import AdjToSpTensor, GCNFilter, OneHotLabels
 
 from libmg import Dataset, Graph, MGCompiler, NodeConfig, EdgeConfig, CompilerConfig, PsiLocal, Phi, Sigma
 from scipy.sparse import coo_matrix
 
 
-class OGBDataset(Dataset):
+
+
+class OGBDataset2(Dataset):
     def __init__(self, dataset_name, gnn, **kwargs):
         self.te_mask = None
         self.va_mask = None
@@ -78,18 +80,18 @@ if __name__ == '__main__':
     n_classes = dataset.n_classes  # OGB labels are sparse indices
 
 
-    expr = '|x>+ ; dense ; |x>+ ; dense ; |x>+ ; out'
+    expr = '|x>+ ; dense ; |x>+ ; out'
     prod = Phi(lambda i, e, j: i * e)
-    sm = Sigma(lambda m, i, n, x: tf.math.segment_sum(m, i))
+    sm = Sigma(lambda m, i, n, x: tf.math.unsorted_segment_sum(m, i, n))
     dense = PsiLocal.make('dense', tf.keras.layers.Dense(channels, activation='relu', use_bias=False))
-    out = PsiLocal.make('out', tf.keras.layers.Dense(n_classes, activation='softmax', use_bias=False))
+    out = PsiLocal.make('out', tf.keras.layers.Dense(n_classes, activation='linear', use_bias=False))
     config = CompilerConfig.xae_config(NodeConfig(tf.float32, 128), EdgeConfig(tf.float32, 1), tf.uint8, {})
     compiler = MGCompiler({'dense': dense, 'out': out}, {'+': sm}, {'x': prod}, config)
     model = compiler.compile(expr)
     model.summary()
 
     optimizer = Adam(learning_rate=learning_rate)
-    loss_fn = SparseCategoricalCrossentropy()
+    loss_fn = SparseCategoricalCrossentropy(from_logits=True)
 
 
     # Training function

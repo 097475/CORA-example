@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 from scipy.sparse import coo_matrix
 from libmg import Graph, Dataset, MGExplainer, Phi, Sigma, PsiLocal, CompilerConfig, MGCompiler, NodeConfig, EdgeConfig, SingleGraphLoader
-from arxiv.arxiv_mg import OGBDataset
+from forward_abstract_interpretation.arxiv.arxiv_mg import OGBDataset
 from z3 import *
 
 from wp_ops import tensor_to_interval, make_layer, idn, relu, product, summation
@@ -33,7 +33,7 @@ class DatasetTest(Dataset):
 
 def get_model(expr, n_node_features, channels, classes):
     prod = Phi(lambda i, e, j: i * e)
-    sm = Sigma(lambda m, i, n, x: tf.math.segment_sum(m, i))
+    sm = Sigma(lambda m, i, n, x: tf.math.unsorted_segment_sum(m, i, n))
     lin1 = PsiLocal.make('lin1', tf.keras.layers.Dense(channels, use_bias=False))
     lin2 = PsiLocal.make('lin2', tf.keras.layers.Dense(classes, use_bias=False))
     sfmax = PsiLocal.make('sfmax', tf.keras.activations.softmax)
@@ -96,5 +96,5 @@ def interpreter_arxiv():
 
 
 if __name__ == '__main__':
-    interpreter_arxiv()
-    # interpreter_debug()
+    # interpreter_arxiv()
+    interpreter_debug()

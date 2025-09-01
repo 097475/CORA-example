@@ -1,8 +1,12 @@
+from copy import deepcopy
+
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 from tensorflow.python.framework.ops import _EagerTensorBase, Operation
-from intervals.number import Interval as I # https://github.com/marcodeangelis/intervals
+from intervals.number import Interval as I  # https://github.com/marcodeangelis/intervals
+
+
 
 # # Basic abstract functions (Forward)
 def AReLU(intv: I) -> I:
@@ -28,27 +32,40 @@ def AReLU(intv: I) -> I:
 def softmax_exact(intv_arr: I) -> I:
     left_exp = np.exp([intv.lo for intv in intv_arr])
     right_exp = np.exp([intv.hi for intv in intv_arr])
-    intervals = I(lo=np.array([left_exp[i] / (sum(right_exp) - (right_exp[i] - left_exp[i])) for i in range(len(intv_arr))]), hi=np.array([right_exp[i] / (sum(left_exp) + (right_exp[i] - left_exp[i])) for i in range(len(intv_arr))]))
+    intervals = I(lo=np.array([left_exp[i] / (sum(right_exp) - (right_exp[i] - left_exp[i])) for i in range(len(intv_arr))]),
+                  hi=np.array([right_exp[i] / (sum(left_exp) + (right_exp[i] - left_exp[i])) for i in range(len(intv_arr))]))
     return intervals
 
+
 # # abstract psi functions (Forward)
+def layer_relu(X, x):
+    return [AReLU(xi) for xi in x]
+
+
 def make_layer(w, activation):
     if activation == 'RELU':
         def lin(X, x):
             return [AReLU(sum(x * w[:, j])) for j in range(w.shape[-1])]
+    elif activation == 'linear':
+        def lin(X, x):
+            return [sum(x * w[:, j]) for j in range(w.shape[-1])]
     else:
         def lin(X, x):
             interval_list = [sum(x * w[:, j]) for j in range(w.shape[-1])]
             return softmax_exact(I(lo=np.array([intv.lo for intv in interval_list]), hi=np.array([intv.hi for intv in interval_list])))
     return lin
 
+
 # # abstract phi functions (Forward)
 def prod(i, e, j):
     return i * e.numpy().item()
 
+
 # # abstract sigma functions (Forward)
 def sm(m, x):
     return sum(m)
+
+
 #
 #
 # # Basic abstract functions (Backward)
@@ -95,17 +112,25 @@ def get_node_labels(x, node_id):
 
 
 def abstract(value: tf.Tensor, delta: float = 0) -> I:
-    x = value.numpy()
-    intv_arr = I(lo=np.array([[elem - delta for elem in row] for row in x]), hi=np.array([[elem + delta for elem in row] for row in x]))
-    return intv_arr
+    if delta != 0:
+        x = value.numpy()
+        intv_arr = I(lo=np.array([[elem - delta for elem in row] for row in x]), hi=np.array([[elem + delta for elem in row] for row in x]))
+        return intv_arr
+    else:
+        return value
 
 
-def concretize(avalue: I) -> tuple[Operation | _EagerTensorBase, ...]:
-    output = []
-    for j in range(avalue.shape[-1]):
-        intv_arr = avalue[:, j]
-        output.append(tf.constant([[intv.lo.item(), intv.hi.item()] for intv in intv_arr]))
-    return tuple(output)
+def abstract_graph(mat):
+    return mat
+
+
+def copier(value):
+    return deepcopy(value)
+
+
+def concretize(amem) -> tuple[Operation | _EagerTensorBase, ...]:
+    avalue = amem.x[0]
+    return avalue.lo, avalue.hi
 
 
 def abs_apply(psi, x):
@@ -113,6 +138,7 @@ def abs_apply(psi, x):
     embeddings = list(map(lambda i: psi(*x, *get_node_labels(x, i)), tqdm(range(n_nodes))))
     embeddings = I(lo=np.array([[intv.lo for intv in row] for row in embeddings]), hi=np.array([[intv.hi for intv in row] for row in embeddings]))
     return embeddings
+
 
 def abs_pre(phi, sigma, x, a, e):
     n_nodes = x[0].shape[0]

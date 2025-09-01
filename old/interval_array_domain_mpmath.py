@@ -2,8 +2,8 @@ from mpmath import iv, mp
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework.ops import _EagerTensorBase, Operation
-from interval import interval, inf, imath # https://pyinterval.readthedocs.io/en/latest/guide.html
-from intervals.number import Interval as I # https://github.com/marcodeangelis/intervals
+# from interval import interval, inf, imath # https://pyinterval.readthedocs.io/en/latest/guide.html
+# from intervals.number import Interval as I # https://github.com/marcodeangelis/intervals
 
 mp.dps = 2
 mp.pretty = True
