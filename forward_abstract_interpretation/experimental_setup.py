@@ -1,9 +1,4 @@
-import math
-
-import torch
-from auto_LiRPA import BoundedModule
-from libmg import Dataset, Phi, Sigma, PsiLocal, PsiGlobal, CompilerConfig, NodeConfig, EdgeConfig, MGCompiler, SingleGraphLoader, MultipleGraphLoader, MGExplainer, mg_reconstructor
-from libmg.compiler.functions import FunctionDict
+from libmg import Dataset, Phi, Sigma, PsiLocal, PsiGlobal, CompilerConfig, NodeConfig, EdgeConfig, MGCompiler, SingleGraphLoader, MultipleGraphLoader, MGExplainer
 from ogb.nodeproppred import NodePropPredDataset
 from scipy.sparse import coo_matrix
 from spektral.data import Graph
@@ -14,12 +9,11 @@ import numpy as np
 import tensorflow as tf
 import os
 # os.environ['AUTOLIRPA_DEBUG'] = '1'
-from keras import losses, optimizers, callbacks, layers, models, metrics
+from keras import losses, optimizers, callbacks
 from tqdm import tqdm
 
-from forward_abstract_interpretation import lirpa_domain
-from lirpa_domain import LirpaInterpreter, interpreter, run_abstract_model
-from run_interpreter import AbstractionSettings, NoAbstraction, EdgeAbstraction, BisimAbstraction
+from lirpa_domain import interpreter, run_abstract_model, check_soundness
+from graph_abstraction import AbstractionSettings, NoAbstraction, EdgeAbstraction, BisimAbstraction
 
 
 class DatasetTest(Dataset):
@@ -230,7 +224,6 @@ def get_gcn(dataset, expr):
         config = CompilerConfig.xae_config(NodeConfig(tf.float32, dataset.n_node_features), EdgeConfig(tf.float32, 1), tf.float32, {'float': 0.000001})
     compiler = MGCompiler({'dense': dense, 'out': out, 'sum': sum_pool, 'mean': mean_pool}, {'+': sm}, {'x': prod}, config)
     model = compiler.compile(expr)
-    # model.build(dataset.n_node_features)
     return model
 
 
@@ -264,8 +257,6 @@ def train_or_load_weights(dataset, model, epochs, patience, learning_rate, retra
 def get_abstract_model(model, abs_settings):
     interpreter.set_concrete_layers(model.mg_layers)
     interpreter.set_graph_abstraction(abs_settings.graph_abstraction)
-    # if abs_settings.graph_abstraction.optimize_memory:
-    #     interpreter.hops = 2
     return interpreter.run(model.expr)
 
 def print_bounds(lb, ub, pred, truth):
@@ -285,23 +276,36 @@ def print_bounds(lb, ub, pred, truth):
     print()
 
 
-def check_soundness(pred, lb, ub):
-    eps = interpreter.atol
-    pred = pred[0] if isinstance(pred, tuple) else pred
-    pred = pred[0] if pred.shape.ndims == 3 else pred
-    lb = lb[0] if lb.ndim == 3 else lb
-    ub = ub[0] if ub.ndim == 3 else ub
-    for i, (prow, lrow, urow) in enumerate(zip(pred, lb, ub)):
-        for j, (p, l, u) in enumerate(zip(prow, lrow, urow)):
-            assert l - eps <= p <= u + eps, "Unsound result at {0},{1}: {2} <!= {3} <!= {4}".format(i, j, l, p, u)
-    print('Soundness check passed')
+# def check_soundness(pred, lb, ub):
+#     eps = interpreter.atol
+#     pred = pred[0] if isinstance(pred, tuple) else pred
+#     pred = pred[0] if pred.shape.ndims == 3 else pred
+#     lb = lb[0] if lb.ndim == 3 else lb
+#     ub = ub[0] if ub.ndim == 3 else ub
+#     for i, (prow, lrow, urow) in enumerate(zip(pred, lb, ub)):
+#         for j, (p, l, u) in enumerate(zip(prow, lrow, urow)):
+#             assert l - eps <= p <= u + eps, "Unsound result at {0},{1}: {2} <!= {3} <!= {4}".format(i, j, l, p, u)
+#     print('Soundness check passed')
 
 
-def is_overlapping(intv1, intv2):
-    return intv1[0] <= intv2[1] and intv1[1] >= intv2[0]
+# def is_overlapping(intv1, intv2):
+#     return intv1[0] <= intv2[1] and intv1[1] >= intv2[0]
+
+def check_robustness(pred_lb, pred_ub, true_idx, n_classes):
+    true_label_lb = pred_lb[true_idx]
+    overlaps = False
+    for i in range(n_classes):
+        if i != true_idx:
+            other_label_ub = pred_ub[i]
+            if true_label_lb <= other_label_ub:
+                overlaps = True
+                print("Failed to prove the property")
+                break
+    if not overlaps:
+        print("Property proved")
 
 
-def run_graph_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True):
+def run_graph_task(model, abstract_model, dataset, abs_settings):
     loader = MultipleGraphLoader(dataset, node_level=False, shuffle=False, epochs=1, batch_size=1)
 
     for graph_tf, graph_np in zip(loader.load(), dataset):
@@ -323,22 +327,25 @@ def run_graph_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=
         abs_prediction_ub = ub[0]
         true_label = graph_np.y
 
-        if not skip_uncorrect or np.argmax(prediction) == np.argmax(true_label):
-            idx = np.argmax(true_label)
-            true_label_lb, true_label_ub = abs_prediction_lb[idx], abs_prediction_ub[idx]
-            overlaps = False
-            for i in range(len(true_label)):
-                if i != idx and is_overlapping((true_label_lb, true_label_ub), (abs_prediction_lb[i], abs_prediction_ub[i])):
-                    print("Failed to prove the property")
-                    overlaps = True
-                    break
-            if not overlaps:
-                print("Property proved")
-        else:
-            print("Skipping because the model failed to predict correctly")
+        check_robustness(abs_prediction_lb, abs_prediction_ub, np.argmax(prediction), dataset.n_labels)
 
 
-def run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True):
+        # if not skip_uncorrect or np.argmax(prediction) == np.argmax(true_label):
+        #     idx = np.argmax(true_label)
+        #     true_label_lb, true_label_ub = abs_prediction_lb[idx], abs_prediction_ub[idx]
+        #     overlaps = False
+        #     for i in range(len(true_label)):
+        #         if i != idx and is_overlapping((true_label_lb, true_label_ub), (abs_prediction_lb[i], abs_prediction_ub[i])):
+        #             print("Failed to prove the property")
+        #             overlaps = True
+        #             break
+        #     if not overlaps:
+        #         print("Property proved")
+        # else:
+        #     print("Skipping because the model failed to predict correctly")
+
+
+def run_node_task(model, abstract_model, dataset, abs_settings):
     graph_tf = SingleGraphLoader(dataset, epochs=1).load().__iter__().__next__()
     graph_np = dataset[0]
     true_labels = graph_np.y
@@ -351,7 +358,7 @@ def run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=T
     for node in tqdm(range(graph_np.n_nodes)):
         # Generate cut graph
         new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
-        print(new_graph.n_nodes)
+        tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
         node_list = sorted(list(set(new_graph.a.row.tolist())))
         mapping = lambda xx: node_list.index(xx)
         mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
@@ -374,22 +381,10 @@ def run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=T
         abs_prediction_lb = lb
         abs_prediction_ub = ub
 
-        print(abs_prediction_lb, abs_prediction_ub)
+        tqdm.write(f"\nConcrete model output at node {node}: {predictions[node].tolist()}")
+        tqdm.write(f"Computed bounds at node {node}: {list(zip(abs_prediction_lb[mapping(node)].tolist(), abs_prediction_ub[mapping(node)].tolist()))}")
 
-        if not skip_uncorrect or np.argmax(predictions[node]) == np.argmax(true_labels[node]):
-            idx = np.argmax(true_labels[node])
-            abs_prediction_lb_node, abs_prediction_ub_node = abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)]
-            true_label_lb, true_label_ub = abs_prediction_lb_node[idx], abs_prediction_ub_node[idx]
-            overlaps = False
-            for i in range(len(true_labels[node])):
-                if i != idx and is_overlapping((true_label_lb, true_label_ub), (abs_prediction_lb_node[i], abs_prediction_ub_node[i])):
-                    print("Failed to prove the property")
-                    overlaps = True
-                    break
-            if not overlaps:
-                print("Property proved")
-        else:
-            print("Skipping because the model failed to predict correctly")
+        check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
 
 
 # def run_node_task_gcn_optimized(model, abstract_model, dataset, abs_settings, skip_uncorrect=True):
@@ -486,38 +481,38 @@ def figure_setup():
     dataset = DatasetFigure(transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
-    model = get_gcn(dataset, '<x|+ ; dense[2] ; <x|+; out')
+    model = get_gcn(dataset, '<x|+ ; dense[2] ; out')
     model.set_weights([np.array([[1., 1.], [-1., 1]]), np.array([0., 0.]), np.array([[1., 1.], [-1., 1]]), np.array([0., 0.])])
     model.summary()
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'backward')
+    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'alpha-crown')
     # abs_settings = AbstractionSettings(0.1, 0.,  EdgeAbstraction({(0, 0), (1, 1), (2, 2)}, True, edge_label_generator='GCN', optimized_gcn=True), 'IBP')
     # abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), 'backward')
     abstract_model = get_abstract_model(model, abs_settings)
-    # run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=False)
+    run_node_task(model, abstract_model, dataset, abs_settings)
 
 
-    for concrete_graph_np, concrete_graph_tf in zip(dataset, MultipleGraphLoader(dataset, node_level=True, epochs=1, shuffle=False).load()):
-        #####
-        # concrete_graph_np.e = np.array([[1/3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/3], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ]], dtype=np.float32)
-
-        ### Setting up graph
-        abs_x, abs_a, abs_e = abs_settings.abstract(concrete_graph_np)
-
-        ### Run
-        abs_lb, abs_ub = run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm)
-
-        ### Concretize
-        lb, ub = abs_settings.concretize(abs_lb, abs_ub)
-
-        (conc_x, conc_a, conc_e, _), y = concrete_graph_tf
-        # conc_e = tf.constant(concrete_graph_np.e)
-
-        pred = model((conc_x, conc_a, conc_e))
-        print(pred)
-        print(lb, ub)
-        check_soundness(pred, lb, ub)
-        print_bounds(lb, ub, pred, y)
+    # for concrete_graph_np, concrete_graph_tf in zip(dataset, MultipleGraphLoader(dataset, node_level=True, epochs=1, shuffle=False).load()):
+    #     #####
+    #     # concrete_graph_np.e = np.array([[1/3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/(math.sqrt(3) * math.sqrt(2)) * 2 / 3], [1/3], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ], [1/3 ]], dtype=np.float32)
+    #
+    #     ### Setting up graph
+    #     abs_x, abs_a, abs_e = abs_settings.abstract(concrete_graph_np)
+    #
+    #     ### Run
+    #     abs_lb, abs_ub = run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm)
+    #
+    #     ### Concretize
+    #     lb, ub = abs_settings.concretize(abs_lb, abs_ub)
+    #
+    #     (conc_x, conc_a, conc_e, _), y = concrete_graph_tf
+    #     # conc_e = tf.constant(concrete_graph_np.e)
+    #
+    #     pred = model((conc_x, conc_a, conc_e))
+    #     print(pred)
+    #     print(lb, ub)
+    #     check_soundness(pred, lb, ub)
+    #     print_bounds(lb, ub, pred, y)
 
 
 # Node task
@@ -532,7 +527,7 @@ def debug_setup():
     # abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'backward')
     abs_settings = AbstractionSettings(0, 0, BisimAbstraction('fw'), 'backward')
     abstract_model = get_abstract_model(model, abs_settings)
-    # run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=False)
+    # run_node_task(model, abstract_model, dataset, abs_settings)
 
     for concrete_graph_np, concrete_graph_tf in zip(dataset, MultipleGraphLoader(dataset, node_level=True, epochs=1, shuffle=False).load()):
         ### Setting up graph
@@ -616,6 +611,11 @@ def proteins_setup():
 
 
 if __name__ == '__main__':
+    # METHODS
+    # ibp
+    # ibp+crown
+    # crown
+    # alpha-crown
     figure_setup()
     # for _ in range(1):
     # debug_setup()

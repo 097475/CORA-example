@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Tuple
 
 import numpy as np
 import scipy.sparse
@@ -9,40 +9,11 @@ from libmg import mg_reconstructor, mg_parser
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm, register_custom_op
 import torch
 import torch.nn as nn
-from auto_LiRPA.operators import Bound, Interval, BoundLinear, MulHelper, BoundMul, multiply_by_A_signs, BoundInput, BoundParams
+from auto_LiRPA.operators import Bound, Interval, BoundMul
 from libmg.compiler.compiler import Context
-from libmg.compiler.layers import FunctionApplication
 from keras import layers
-from torch import Tensor
 from tqdm import tqdm
 
-from auto_LiRPA.operators import BoundMatMul
-
-from auto_LiRPA.operators import BoundTranspose
-
-
-# def check_soundness(pred, lb, ub):
-#     eps = 0.000001
-#     pred = pred[0] if isinstance(pred, tuple) else pred
-#     pred = pred[0] if pred.shape.ndims == 3 else pred
-#     lb = lb[0] if lb.ndim == 3 else lb
-#     ub = ub[0] if ub.ndim == 3 else ub
-#     for i, (prow, lrow, urow) in enumerate(zip(pred, lb, ub)):
-#         for j, (p, l, u) in enumerate(zip(prow, lrow, urow)):
-#             assert l - eps <= p <= u + eps, "Unsound result at {0},{1}: {2} <!= {3} <!= {4}".format(i, j, l, p, u)
-#     print('Soundness check passed')
-
-
-# def check_soundness(pred, lb, ub):
-#     eps = 0.000001
-#     pred = pred[0] if isinstance(pred, tuple) else pred
-#     pred = pred[0] if pred.shape.ndims == 3 else pred
-#     lb = lb[0] if lb.ndim == 3 else lb
-#     ub = ub[0] if ub.ndim == 3 else ub
-#     for i, (prow, lrow, urow) in enumerate(zip(pred, lb, ub)):
-#         for j, (p, l, u) in enumerate(zip(prow, lrow, urow)):
-#             assert l - eps <= p <= u + eps, "Unsound result at {0},{1}: {2} <!= {3} <!= {4}".format(i, j, l, p, u)
-#     print('Soundness check passed')
 
 # def forward_lub(ml1, mu1, l1, u1, ml2, mu2, l2, u2):
 #     mask = torch.flatten(l1[0]) <= torch.flatten(l2[0])
@@ -73,157 +44,36 @@ def interval_to_bounded_tensor(lb, ub):
     return BoundedTensor(torch.zeros_like(lb), ptb)
 
 # Phi functions
-def phi_product(i, e, j):
+def conc_phi_product(i, e, j):
     return i * e
 
-
-# def abs_phi_product(i: Tuple[torch.Tensor, torch.Tensor], e: Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]], j: Tuple[torch.Tensor, torch.Tensor]):
-#     if isinstance(e, tuple):
-#         x, y = i, e
-#         r0, r1, r2, r3 = x[0] * y[0], x[0] * y[1], x[1] * y[0], x[1] * y[1]
-#         lower = torch.min(torch.min(r0, r1), torch.min(r2, r3))
-#         upper = torch.max(torch.max(r0, r1), torch.max(r2, r3))
-#         return lower, upper
-#     else:
-#         op = lambda x, const: x * const
-#         const = e
-#         inp_lb = i[0]
-#         inp_ub = i[1]
-#         pos_mask = (const > 0).to(dtype=inp_lb.dtype)
-#         neg_mask = 1. - pos_mask
-#         lb = op(inp_lb, const * pos_mask) + op(inp_ub, const * neg_mask)
-#         ub = op(inp_ub, const * pos_mask) + op(inp_lb, const * neg_mask)
-#         return lb, ub
-
-
-def abs_phi_product(i: Tuple[torch.Tensor, torch.Tensor], e: Tuple[torch.Tensor, torch.Tensor], j: Tuple[torch.Tensor, torch.Tensor]):
+def intv_phi_product(i: Tuple[torch.Tensor, torch.Tensor], e: Tuple[torch.Tensor, torch.Tensor], j: Tuple[torch.Tensor, torch.Tensor]):
     x, y = i, e
     r0, r1, r2, r3 = x[0] * y[0], x[0] * y[1], x[1] * y[0], x[1] * y[1]
     lower = torch.min(torch.min(r0, r1), torch.min(r2, r3))
     upper = torch.max(torch.max(r0, r1), torch.max(r2, r3))
     return lower, upper
-# def abs_phi_product2(i, e, j):
-#     x, y = i, e
-#     r0, r1, r2, r3 = x[0] * y[0], x[0] * y[1], x[1] * y[0], x[1] * y[1]
-#     lower = torch.min(torch.min(r0, r1), torch.min(r2, r3))
-#     upper = torch.max(torch.max(r0, r1), torch.max(r2, r3))
-#     return lower, upper
 
-# def abs_fwd_phi_product(i, e, j):
-#     return i * e
-
-# def abs_phi_prod2(e):
-#     elow, ehigh, xlow, xhigh = e
-#
-#     if elow is None and ehigh is None:
-#         return torch.zeros_like(xlow), torch.zeros_like(xhigh)
-#
-#     low_edge = []
-#     high_edge = []
-#     if (elow * xlow < ehigh * xlow and elow * xlow < ehigh * xhigh) or (elow * xhigh < ehigh * xhigh and elow * xhigh < ehigh * xlow):
-#         low_edge.append(elow)
-#         high_edge.append(ehigh)
-#     else:
-#         low_edge.append(ehigh)
-#         high_edge.append(elow)
-#     lowt = torch.stack(low_edge).squeeze()
-#     hight = torch.stack(high_edge).squeeze()
-#     return lowt, hight
-
-# def abs_bwd_phi_product(e):
-#     elow, ehigh, xlow, xhigh = e
-#
-#     if elow is None and ehigh is None:
-#         return torch.zeros_like(xlow), torch.zeros_like(xhigh)
-#
-#     low_edge = []
-#     high_edge = []
-#     for k in range(len(xlow)):
-#         if (elow * xlow[k] < ehigh * xlow[k] and elow * xlow[k] < ehigh * xhigh[k]) or (elow * xhigh[k] < ehigh * xhigh[k] and elow * xhigh[k] < ehigh * xlow[k]):
-#             low_edge.append(elow)
-#             high_edge.append(ehigh)
-#         else:
-#             low_edge.append(ehigh)
-#             high_edge.append(elow)
-#     lowt = torch.stack(low_edge).squeeze()
-#     hight = torch.stack(high_edge).squeeze()
-#     return lowt, hight
-
-
-# def abs_bwd_phi_product(i, e, j):
-#     ilow, ihigh = i
-#     elow, ehigh, xlow, xhigh = e
-#
-#     if elow is None and ehigh is None:
-#         return torch.zeros_like(ilow), torch.zeros_like(ihigh)
-#
-#     low_edge = []
-#     high_edge = []
-#     for k in range(len(ilow)):
-#         if (elow * xlow[k] < ehigh * xlow[k] and elow * xlow[k] < ehigh * xhigh[k]) or (elow * xhigh[k] < ehigh * xhigh[k] and elow * xhigh[k] < ehigh * xlow[k]):
-#             low_edge.append(elow)
-#             high_edge.append(ehigh)
-#         else:
-#             low_edge.append(ehigh)
-#             high_edge.append(elow)
-#     lowt = torch.stack(low_edge).squeeze()
-#     hight = torch.stack(high_edge).squeeze()
-#     return ilow*lowt, ihigh*hight
-
-
-# def abs_bwd_phi_product_with_bot(i, e, j):
-#     ilow, ihigh = i
-#     elow, ehigh, xlow, xhigh = e
-#     bot = torch.zeros_like(elow)
-#
-#     low_edge = []
-#     high_edge = []
-#     edge_values = [elow, elow, ehigh, ehigh, bot, bot]
-#     for k in range(len(ilow)):
-#         comps = np.array([elow * xlow[k], elow * xhigh[k], ehigh * xlow[k], ehigh * xhigh[k], bot * xlow[k], bot * xhigh[k]])
-#         min_index, max_index = np.argmin(comps), np.argmax(comps)
-#         low_edge.append(edge_values[min_index])
-#         high_edge.append(edge_values[max_index])
-#     lowt = torch.stack(low_edge).squeeze()
-#     hight = torch.stack(high_edge).squeeze()
-#     return ilow*lowt, ihigh*hight
-
-
-
-# def abs_bwd_phi_product2(i, e, j):
-#     ilow, ihigh = i
-#     elow, ehigh, xlow, xhigh = e
-#
-#     if elow is None and ehigh is None:
-#         return torch.zeros_like(ilow), torch.zeros_like(ihigh)
-#
-#     low_edge = []
-#     high_edge = []
-#     if (elow * xlow < ehigh * xlow and elow * xlow < ehigh * xhigh) or (elow * xhigh < ehigh * xhigh and elow * xhigh < ehigh * xlow):
-#         low_edge.append(elow)
-#         high_edge.append(ehigh)
-#     else:
-#         low_edge.append(ehigh)
-#         high_edge.append(elow)
-#     lowt = torch.stack(low_edge).squeeze()
-#     hight = torch.stack(high_edge).squeeze()
-#     return ilow*lowt, ihigh*hight
-
+def poly_phi_product(i, e, j):
+    il, ih = i
+    el, eh = e
+    argmin = np.argmin([el * il, el * ih, eh * il, eh * ih])
+    emin, emax = (el, eh) if argmin <= 1 else (eh, el)
+    return emin, emax
 
 # Sigma functions
-def sigma_sum(m, x):
+def conc_sigma_sum(m, x):
     return torch.stack(m).sum(dim=0)
 
-def abs_sigma_sum(m, x):
+def intv_sigma_sum(m, x):
     lbs = [msg[0] for msg in m]
     ubs = [msg[1] for msg in m]
     return sum(lbs), sum(ubs)
 
-# def abs_fwd_sigma_sum(m, x):
-#     return sum(m)
-
-def abs_bwd_sigma_sum(m, x):
-    return sum(m)
+def poly_sigma_sum(m, x):
+    lbs = [msg[0] for msg in m]
+    ubs = [msg[1] for msg in m]
+    return sum(lbs), sum(ubs)
 
 
 # Psi functions
@@ -310,25 +160,26 @@ def abstract_adj(mat: scipy.sparse.coo_matrix) -> torch.Tensor:
 
 
 # Concretization
-def run_abstract_model(model, x, a, e, algorithm):
-    lirpa_model = BoundedModule(model, (torch.empty_like(x), a, torch.empty_like(e)), device=a.device, verbose=True)
-    lb, ub = lirpa_model.compute_bounds(x=(x, a, e), method=algorithm, IBP=True)
-    print(lirpa_model.save_intermediate())
+def run_abstract_model(model, x, a, e, algorithm, verbose=False):
+    abs_model = BoundedModule(model, (torch.empty_like(x), a, torch.empty_like(e)), device=a.device, verbose=verbose)
+    lb, ub = abs_model.compute_bounds(x=(x, a, e), method=algorithm)
+    # print(lirpa_model.save_intermediate())
     return lb.detach()[0], ub.detach()[0]
 
 # Function store
 class Transformer:
-    def __init__(self, concrete_transformer, interval_transformer, id_element):
+    def __init__(self, concrete_transformer, interval_transformer, poly_transformer, id_element):
         self.concrete_transformer = concrete_transformer
         self.interval_transformer = interval_transformer
+        self.poly_transformer = poly_transformer
         self.id_element = id_element
 
     def identity_like(self, t):
         tensor = torch.full_like(t, self.id_element)
         return tensor, tensor
 
-fucts = {'x': Transformer(phi_product, abs_phi_product, 1.),
-         '+': Transformer(sigma_sum, abs_sigma_sum, 0.)}
+fucts = {'x': Transformer(conc_phi_product, intv_phi_product, poly_phi_product, 1.),
+         '+': Transformer(conc_sigma_sum, intv_sigma_sum, poly_sigma_sum, 0.)}
 
 # Message-passing procedures
 def concrete_message_passing(src_idx, tgt_idx, function_store_phi, function_store_sigma, use_optimized_gcn, x, a, e):
@@ -347,7 +198,6 @@ def concrete_message_passing_general(src_idx, tgt_idx, function_store_phi, funct
     index_targets = a[0][tgt_idx]  # Nodes receiving the message
     index_sources = a[0][src_idx]  # Nodes sending the message (ie neighbors)
     x = x[0]
-    # e = e[0]
     # Message
     messages = [[] for _ in range(n_nodes)]  # list of lists of messages
     for idx in range(n_edges):
@@ -361,17 +211,8 @@ def concrete_message_passing_general(src_idx, tgt_idx, function_store_phi, funct
 @torch.no_grad()
 def concrete_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, function_store_sigma, x, a, e):
     x = x[0]
-    # e = e[0]
     # Message
     return torch.matmul(e.transpose(-1, -2) if src_idx == 0 else e, x)
-    # messages = [[] for _ in range(n_nodes)]  # list of lists of messages
-    # for idx in range(n_edges):
-    #     messages[index_targets[idx]].append(phi(x[index_sources[idx], :], e[idx], x[index_targets[idx], :]))
-    # # Aggregate
-    # embeddings = [sigma(m, x[i, :]) for i, m in enumerate(messages)]
-    # embeddings = torch.stack(embeddings).unsqueeze(0)
-    # # Update
-    # return embeddings
 
 def interval_message_passing(src_idx, tgt_idx, function_store_phi, function_store_sigma, use_optimized_gcn, x, a, e):
     if use_optimized_gcn:
@@ -410,17 +251,6 @@ def interval_message_passing_general(src_idx, tgt_idx, function_store_phi, funct
 
 @torch.no_grad()
 def interval_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, function_store_sigma, x, a, e):
-    abs_phi = function_store_phi.interval_transformer
-    abs_sigma = function_store_sigma.interval_transformer
-    # a = a[0][0]  # not an interval
-    n_nodes = x[0].shape[1]
-    index_targets = a[tgt_idx]  # Nodes receiving the message
-    index_sources = a[src_idx]  # Nodes sending the message (ie neighbors)
-    edge_status = a[0] #torch.zeros_like(e[0]) # e[0].clone()
-    # edge_status[0][a[0], a[1]] = a[2].float()
-
-    # messages = [[] for _ in range(n_nodes)]  # list of lists of messages
-
     v = [e, x]
 
     # This will convert an Interval object to tuple.
@@ -529,8 +359,6 @@ def interval_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi,
 #     uAx = uA
 #
 #     return [(lAx, uAx), (None, None), (None, None)], 0., 0.
-
-
 
 
 # old version, edge_abs + no_abs, edge postimg faulty
@@ -1004,8 +832,8 @@ def bwd_message_passing(src_idx, tgt_idx, function_store_phi, function_store_sig
 @torch.no_grad()
 def bwd_message_passing_general(src_idx, tgt_idx, function_store_phi, function_store_sigma, last_lA, last_uA, x, a, e):
     """ Backward mode bound propagation """
-    abs_phi = function_store_phi.interval_transformer
-    abs_sigma = function_store_sigma.interval_transformer
+    abs_phi = function_store_phi.poly_transformer
+    abs_sigma = function_store_sigma.poly_transformer
     n_nodes = x.output_shape[1]
     n_vars_post = last_lA.shape[0]
     n_vars_pre = last_lA.shape[-2] * last_lA.shape[-1]
@@ -1043,19 +871,23 @@ def bwd_message_passing_general(src_idx, tgt_idx, function_store_phi, function_s
                         sidx = index_sources[idx]
                         self.indices[(_node, offset)].append(sidx)
                         if certain_edge is True:
-                            e0, e1 = elow[idx], ehigh[idx]
+                            el, eh = elow[idx], ehigh[idx]
                             src_node = index_sources[idx]
-                            xl, xh = self.xlow[0][src_node][offset], self.xhigh[0][src_node][offset]
-                            argmin = np.argmin([e0 * xl, e0 * xh, e1 * xl,  e1 * xh])
-                            emin, emax = (e0, e1) if argmin <= 1 else (e1, e0)
+                            tgt_node = index_targets[idx]
+                            il, ih = self.xlow[0][src_node][offset], self.xhigh[0][src_node][offset]
+                            jl, jh = self.xlow[0][tgt_node][offset], self.xhigh[0][tgt_node][offset]
+                            # argmin = np.argmin([e0 * xl, e0 * xh, e1 * xl,  e1 * xh])
+                            emin, emax = abs_phi((il, ih), (el, eh), (jl, jh)) # (e0, e1) if argmin <= 1 else (e1, e0)
                             self.lows[(_node, offset)].append(emin)
                             self.highs[(_node, offset)].append(emax)
                         else:
-                            e0, e1 = elow[idx], ehigh[idx]
+                            el, eh = elow[idx], ehigh[idx]
                             src_node = index_sources[idx]
-                            xl, xh = self.xlow[0][src_node][offset], self.xhigh[0][src_node][offset]
-                            argmin = np.argmin([e0 * xl, e0 * xh, e1 * xl,  e1 * xh])
-                            emin, emax = (e0, e1) if argmin <= 1 else (e1, e0)
+                            tgt_node = index_targets[idx]
+                            il, ih = self.xlow[0][src_node][offset], self.xhigh[0][src_node][offset]
+                            jl, jh = self.xlow[0][tgt_node][offset], self.xhigh[0][tgt_node][offset]
+                            # argmin = np.argmin([e0 * xl, e0 * xh, e1 * xl,  e1 * xh])
+                            emin, emax = abs_phi((il, ih), (el, eh), (jl, jh)) # (e0, e1) if argmin <= 1 else (e1, e0)
                             bot_low, bot_high = function_store_sigma.identity_like(elow[idx]) # abs_phi((elow[idx], ehigh[idx]), None, (elow[idx], ehigh[idx]))
                             self.lows[(_node, offset)].append(torch.min(emin, bot_low))
                             self.highs[(_node, offset)].append(torch.max(emax, bot_high))
@@ -1081,13 +913,14 @@ def bwd_message_passing_general(src_idx, tgt_idx, function_store_phi, function_s
 
     lA = torch.empty((last_lA.shape[0], 1, n_nodes * n_node_features_pre))
     uA = torch.empty((last_lA.shape[0], 1, n_nodes * n_node_features_pre))
-    for node in tqdm(range(n_nodes)):
+    node_iterator = tqdm(range(n_nodes))
+    for node in node_iterator:
         for v_offset in range(n_node_features_post):
             v = node * n_node_features_post + v_offset
             non_zero_indices_l = torch.nonzero(reshaped_last_la[v], as_tuple=True)[1]
             non_zero_indices_u = torch.nonzero(reshaped_last_ua[v], as_tuple=True)[1]
             if non_zero_indices_u.nelement() != 0 and non_zero_indices_l.nelement() != 0:
-                prev_values_la = reshaped_last_la[v][0][non_zero_indices_u]
+                prev_values_la = reshaped_last_la[v][0][non_zero_indices_l]
                 prev_values_ua = reshaped_last_ua[v][0][non_zero_indices_u]
                 node_val = node_val_obj.get_node_values(non_zero_indices_u)
                 rec_value_la = reshaped_last_la[v]
@@ -1164,24 +997,14 @@ def bwd_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, func
     input_lb[1] = input_lb[1].unsqueeze(-3)
     input_ub[1] = input_ub[1].unsqueeze(-3)
 
-    # (alpha_l, beta_l, gamma_l,
-    #  alpha_u, beta_u, gamma_u) = MulHelper.interpolated_relaxation(input_lb[0], input_ub[0], input_lb[1], input_ub[1])
 
     x_l, x_u, y_l, y_u = input_lb[0], input_ub[0], input_lb[1], input_ub[1]
 
     alpha_l, beta_l, gamma_l = y_l, x_l, -y_l * x_l
     alpha_u, beta_u, gamma_u = y_u, x_l, -y_u * x_l
 
-    # x_shape = input_lb[0].size()
     gamma_l = torch.sum(gamma_l, dim=-1)
     gamma_u = torch.sum(gamma_u, dim=-1)
-
-    # if len(e.output_shape) != 2 and len(e.output_shape) == len(x.output_shape):
-    # dim_y = [-3]
-    # elif len(x.output_shape) == 2:
-    #     dim_y = list(range(2, 2 + len(x_shape) - 2))
-    # else:
-    #     raise NotImplementedError
 
 
     @torch.jit.script
@@ -1231,11 +1054,9 @@ def bwd_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, func
             A_new += A_pos_i * w_pos + A_neg_i * w_neg
 
         A_y = A_new
-        # if len(dim_y) != 0:
-        #     A_y = torch.sum(A_y, dim=dim_y)
+
         return A_x, A_y
 
-    @torch.jit.script
     def _bound_oneside(last_A, alpha_pos, beta_pos, gamma_pos, alpha_neg, beta_neg, gamma_neg):
         if last_A is None:
             return None, None, 0
@@ -1258,10 +1079,10 @@ def bwd_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, func
 
     results = [(lA_x, uA_x), (lA_y, uA_y)], lbias, ubias
 
-    lA_y = results[0][1][0].transpose(-1, -2)
-    uA_y = results[0][1][1].transpose(-1, -2)
-    lA_e = results[0][0][0].transpose(-1, -2)
-    uA_e = results[0][0][1].transpose(-1, -2)
+    lA_y = results[0][1][0].transpose(-1, -2) if results[0][1][0] is not None else None
+    uA_y = results[0][1][1].transpose(-1, -2) if results[0][1][1] is not None else None
+    lA_e = results[0][0][0].transpose(-1, -2) if results[0][0][0] is not None else None
+    uA_e = results[0][0][1].transpose(-1, -2) if results[0][0][1] is not None else None
 
     if isinstance(results[1], tuple):
         lbias = (results[1][0], results[1][1].transpose(-1, -2))
@@ -1635,33 +1456,32 @@ def bwd_message_passing_gcn_optimized(src_idx, tgt_idx, function_store_phi, func
 ############## PREIMAGE
 class Pre(torch.autograd.Function):
     @staticmethod
-    def symbolic(g, x, a, e, phis, sigmas, use_optimized_gcn, hops_left):
+    def symbolic(g, x, a, e, phis, sigmas, use_optimized_gcn):
         """ In this function, define the arguments and attributes of the operator.
         "custom::SigmaSum" is the name of the new operator, "x" is an argument
         of the operator, "const_i" is an attribute which stands for "c" in the operator.
         There can be multiple arguments and attributes. For attribute naming,
         use a suffix such as "_i" to specify the data type, where "_i" stands for
         integer, "_t" stands for tensor, "_f" stands for float, etc. """
-        return g.op('custom::Pre', x, a, e, phi_s=phis, sigma_s=sigmas, use_optimized_gcn_s=str(use_optimized_gcn), hops_left_i=hops_left).setType(x.type())
+        return g.op('custom::Pre', x, a, e, phi_s=phis, sigma_s=sigmas, use_optimized_gcn_s=str(use_optimized_gcn)).setType(x.type())
 
     @staticmethod
-    def forward(ctx, x, a, e, phis, sigmas, use_optimized_gcn, hops_left):
+    def forward(ctx, x, a, e, phis, sigmas, use_optimized_gcn):
         """ In this function, implement the computation for the operator, i.e.,
         f(x) = i * e in this case. """
         return concrete_message_passing(0, 1, fucts[phis], fucts[sigmas], use_optimized_gcn, x, a, e)
 
 
 class PreImage(nn.Module):
-    def __init__(self, phi_f, sigma_f, use_optimized_gcn, hops_left):
+    def __init__(self, phi_f, sigma_f, use_optimized_gcn):
         super().__init__()
         self.phi_f = phi_f
         self.sigma_f = sigma_f
         self.use_optimized_gcn = use_optimized_gcn
-        self.hops_left = hops_left
 
     def forward(self, x, a, e):
         """ Use `.apply` to call the defined custom operator."""
-        return Pre.apply(x, a, e, self.phi_f, self.sigma_f, self.use_optimized_gcn, self.hops_left)
+        return Pre.apply(x, a, e, self.phi_f, self.sigma_f, self.use_optimized_gcn)
 
 
 class BoundPre(Bound):
@@ -1670,7 +1490,7 @@ class BoundPre(Bound):
         self.phi_f = attr['phi']
         self.sigma_f = attr['sigma']
         self.use_optimized_gcn = attr['use_optimized_gcn'] == 'True'
-        self.hops_left = attr['hops_left']
+        self.requires_input_bounds = [0]
 
     def forward(self, x, a, e):
         return concrete_message_passing(0, 1, fucts[self.phi_f], fucts[self.sigma_f], self.use_optimized_gcn, x, a, e)
@@ -1711,109 +1531,14 @@ class BoundPre(Bound):
 
     def bound_backward(self, last_lA, last_uA, x, a, e, **kwargs):
         """ Backward mode bound propagation """
-        # def update_shapes(node, reach):
-        #     node.upper = node.upper[:, reach, :]
-        #     node.shape = node.upper.shape[1:]
-        #     node.output_shape = node.upper.shape
-        #     node.lower = node.lower[:, reach, :]
-        #     node.interval = node.interval[0][:, reach, :], node.interval[1][:, reach, :]
-        #     node.input_shape = node.output_shape
-        #     node.flattened_nodes = torch.prod(torch.tensor(node.shape))
-        #     for inp in node.inputs:
-        #         if not isinstance(inp, BoundInput) and not isinstance(inp, BoundTranspose):
-        #             update_shapes(inp, reach)
-        #         elif isinstance(inp, BoundInput) and not isinstance(inp, BoundParams):
-        #             if inp.name != '/x.1': continue
-        #             inp.value = BoundedTensor(inp.value[:, reach, :], inp.value.ptb)
-        #             inp.upper = inp.upper[:, reach, :]
-        #             inp.perturbation = inp.value.ptb
-        #             inp.output_shape = inp.value.shape
-        #             inp.lower = inp.lower[:, reach, :]
-        #             inp.linear.lower = inp.lower
-        #             inp.linear.upper = inp.upper
-        #             inp.interval = Interval(inp.interval[0][:, node_reachability, :], inp.interval[1][:, node_reachability, :], inp.perturbation)
-        #             inp.center = inp.center[:, node_reachability, :]
-        #
-        #
-        # # if self.graph_abstraction == 'NoAbstraction' or self.graph_abstraction == 'BisimAbstraction':
-        #
-        # if self.hops_left > 0 and True:
-        #     node = 1
-        #     node_reachability = sum(torch.linalg.matrix_power(a.forward_value, i) for i in range(self.hops_left + 1))[0][:, node] > 0
-        #
-        #     a.value = a.value[:, node_reachability, :][:, :, node_reachability]
-        #     a.upper = a.upper[:, node_reachability, :][:, :, node_reachability]
-        #     a.output_shape = a.value.shape
-        #     a.lower = a.lower[:, node_reachability, :][:, :, node_reachability]
-        #     a.interval = a.value, a.value
-        #     a.forward_value = a.value
-        #     a.center = a.value
-        #
-        #     e.value = BoundedTensor(e.value[:, node_reachability, :][:, :, node_reachability], PerturbationLpNorm(x_L=e.value.ptb.x_L[:, node_reachability, :][:, :, node_reachability], x_U=e.value.ptb.x_U[:, node_reachability, :][:, :, node_reachability]))
-        #     e.upper = e.upper[:, node_reachability, :][:, :, node_reachability]
-        #     e.perturbation = PerturbationLpNorm(x_L=e.value.ptb.x_L, x_U=e.value.ptb.x_U)
-        #     e.output_shape = e.value.shape
-        #     e.lower = e.lower[:, node_reachability, :][:, :, node_reachability]
-        #     e.linear.lower = e.lower
-        #     e.linear.upper = e.upper
-        #     e.interval = Interval(e.interval[0][:, node_reachability, :][:, :, node_reachability], e.interval[1][:, node_reachability, :][:, :, node_reachability], e.perturbation)
-        #     e.center = e.center[:, node_reachability, :][:, :, node_reachability]
-        #
-        #     x.upper = x.upper[:, node_reachability, :]
-        #     x.shape = x.upper.shape[1:]
-        #     x.output_shape = x.upper.shape
-        #     x.lower = x.lower[:, node_reachability, :]
-        #     x.interval = x.interval[0][:, node_reachability, :], x.interval[1][:, node_reachability, :]
-        #     x.input_shape = x.output_shape
-        #     x.flattened_nodes = torch.prod(torch.tensor(x.shape))
-        #     update_shapes(x.inputs[0], node_reachability)
-        #
-        #
-        #     node_indices = torch.where(node_reachability)[0]
-        #     node_features_post = last_lA.shape[0] // last_lA.shape[2]
-        #     matrix_indices = torch.cat([torch.tensor([node_features_post * i, node_features_post * i + 1]) for i in node_indices])
-        #
-        #
-        #     la_filtered = lAx[matrix_indices]
-        #     lAx = la_filtered[:, :, node_reachability, :]
-        #
-        #     ua_filtered = uAx[matrix_indices]
-        #     uAx = ua_filtered[:, :, node_reachability, :]
-        #
-        #     lae_filtered = lAe[matrix_indices]
-        #     lAe = lae_filtered[:, :, node_reachability, :][:, :, :, node_reachability]
-        #
-        #     uae_filtered = uAe[matrix_indices]
-        #     uAe = uae_filtered[:, :, node_reachability, :][:, :, :, node_reachability]
-        #
-        #     lbias = lbias[matrix_indices]
-        #
-        #     ubias = ubias[matrix_indices]
-        # elif self.hops_left == 0 and True:
-        #     node = 1
-        #     node_reachability = sum(torch.linalg.matrix_power(a.forward_value, i) for i in range(self.hops_left + 1))[0][:, node] > 0
-        #     node_reachability = torch.Tensor([True, True, True, False, True])
-        #     node_indices = torch.where(node_reachability)[0]
-        #     node_features_post = last_lA.shape[0] // last_lA.shape[2]
-        #     matrix_indices = torch.cat([torch.tensor([node_features_post * i, node_features_post * i + 1]) for i in node_indices])
-        #     x.reachability = matrix_indices
-
         ((lAx, uAx), _, (lAe, uAe)), lbias, ubias = bwd_message_passing(0, 1, fucts[self.phi_f], fucts[self.sigma_f], self.use_optimized_gcn, last_lA, last_uA, x, a, e)
         return [(lAx, uAx), (None, None), (lAe, uAe)], lbias, ubias
-        # elif self.graph_abstraction == 'EdgeAbstraction':
-        #     return bwd_message_passing_edge_abs(0, 1, fucts[self.phi_f], fucts[self.sigma_f], last_lA, last_uA, x, a, e)
-        # else:
-        #     raise NotImplementedError
+
 
     def interval_propagate(self, *v):
         """ IBP computation """
         x, a, e = v
-        # if self.graph_abstraction == 'NoAbstraction' or self.graph_abstraction == 'BisimAbstraction':
         return interval_message_passing(0, 1, fucts[self.phi_f], fucts[self.sigma_f], self.use_optimized_gcn, x, a, e)
-        # elif self.graph_abstraction == 'EdgeAbstraction':
-        #     return interval_message_passing_edge_abs(0, 1, fucts[self.phi_f], fucts[self.sigma_f], x, a, e)
-        # else:
-        #     raise NotImplementedError
 
 
 register_custom_op("custom::Pre", BoundPre)
@@ -1897,22 +1622,12 @@ class BoundPost(Bound):
 
     def bound_backward(self, last_lA, last_uA, x, a, e, **kwargs):
         """ Backward mode bound propagation """
-        # if self.graph_abstraction == 'NoAbstraction' or self.graph_abstraction == 'BisimAbstraction':
         return bwd_message_passing(1, 0, fucts[self.phi_f], fucts[self.sigma_f], self.use_optimized_gcn, last_lA, last_uA, x, a, e)
-        # elif self.graph_abstraction == 'EdgeAbstraction':
-        #     return bwd_message_passing_edge_abs(1, 0, fucts[self.phi_f], fucts[self.sigma_f], last_lA, last_uA, x, a, e)
-        # else:
-        #     raise NotImplementedError
 
     def interval_propagate(self, *v):
         """ IBP computation """
         x, a, e = v
-        # if self.graph_abstraction == 'NoAbstraction' or self.graph_abstraction == 'BisimAbstraction':
         return interval_message_passing(1, 0, fucts[self.phi_f], fucts[self.sigma_f], self.use_optimized_gcn, x, a, e)
-        # elif self.graph_abstraction == 'EdgeAbstraction':
-        #     return interval_message_passing_edge_abs(1, 0, fucts[self.phi_f], fucts[self.sigma_f], x, a, e)
-        # else:
-        #     raise NotImplementedError
 
 
 register_custom_op("custom::Post", BoundPost)
@@ -2129,20 +1844,20 @@ class BoundFix(Bound):
 register_custom_op("custom::Fix", BoundFix)
 
 ########################################################################################################################################################
-class PreGCN(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x, a, e):
-        return torch.matmul(e.transpose(-1, -2), x)
-
-
-class PostGCN(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x, a, e):
-        return torch.matmul(e, x)
+# class PreGCN(nn.Module):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#
+#     def forward(self, x, a, e):
+#         return torch.matmul(e.transpose(-1, -2), x)
+#
+#
+# class PostGCN(nn.Module):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#
+#     def forward(self, x, a, e):
+#         return torch.matmul(e, x)
 
 
 
@@ -2155,8 +1870,6 @@ class LirpaInterpreter(Interpreter):
         self.mg_layers = None
         self.context = Context()
         self.use_optimized_gcn = None
-        self.hops = 0
-        self.rev_hops = 0
 
     def set_graph_abstraction(self, graph_abstraction):
         self.graph_abstraction = graph_abstraction
@@ -2167,9 +1880,6 @@ class LirpaInterpreter(Interpreter):
     def set_tolerance(self, atol, rtol):
         self.atol = atol
         self.rtol = rtol
-
-    # def optimized_gcn(self, value):
-    #     self.use_optimized_gcn = value
 
     def get_concrete_layer(self, tree):
         return self.mg_layers[hash(self.context.get(tree))]
@@ -2217,15 +1927,11 @@ class LirpaInterpreter(Interpreter):
     def lhd(self, tree):
         phi, sigma = tree.children
         phi, sigma = self.visit(phi), self.visit(sigma)
-        concrete_op = self.get_concrete_layer(tree)
-        hops = self.rev_hops
-        self.rev_hops += 1
-        return PreImage(phi, sigma, self.graph_abstraction.optimized_gcn, hops)
+        return PreImage(phi, sigma, self.graph_abstraction.optimized_gcn)
 
     def rhd(self, tree):
         phi, sigma = tree.children
         phi, sigma = self.visit(phi), self.visit(sigma)
-        concrete_op = self.get_concrete_layer(tree)
         return PostImage(phi, sigma, self.graph_abstraction.optimized_gcn)
 
     def sequential_composition(self, tree):
@@ -2277,14 +1983,6 @@ class LirpaInterpreter(Interpreter):
 interpreter = LirpaInterpreter()
 
 
-
-# def copier(value):
-#     if isinstance(value, tuple) and isinstance(value[0], list):
-#         perturbation = value[0][0].ptb
-#         tensors = tuple([BoundedTensor(deepcopy(t[0].data), perturbation)] + t[1:] for t in value)
-#         return tensors
-#     else:
-#         return deepcopy(value)
 
 
 # class MyModel(nn.Module):

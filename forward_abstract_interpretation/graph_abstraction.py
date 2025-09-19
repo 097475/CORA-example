@@ -1,13 +1,17 @@
+import abc
 import math
 from copy import deepcopy
 from typing import Literal
 
 import numpy as np
 from functools import reduce
+
+import torch
 from scipy.sparse import coo_matrix
 from spektral.data import Graph
 from spektral.utils import normalized_adjacency, degree_power
 
+from forward_abstract_interpretation import lirpa_domain
 from weighted_bisimulation import lumpability
 
 
@@ -139,111 +143,147 @@ def bisim_abstraction(graph: Graph, direction: Literal['fw', 'bw', 'fwbw']):
     return BisimulationMap(bisim), regenerate_graph(graph, bisim, lumped_matrix), graph.y
 
 
-# def bisim_abstraction(graph: Graph, epsilon, mode: Literal['nodes', 'edges', 'both']):
-#     digits = -(math.log10(epsilon) + 1)
-#     x, a, e = graph.x, graph.a, graph.e
-#     n_nodes = x.shape[0]
-#     n_node_features = x.shape[1]
-#     n_edges = e.shape[0]
-#     n_edge_features = e.shape[1]
-#     if mode == 'nodes':
-#         nx_graph = nx.DiGraph(a)
-#         # nodes with the same label are put in the same initial partition
-#         uniques, inverse = np.unique(x.round(decimals=int(digits)), return_inverse=True, axis=0)
-#         num_partitions = len(uniques)
-#         partitions = [() for _ in range(num_partitions)] # partitions are lists of tuples
-#         for i in range(n_nodes):
-#             partitions[inverse[i]] += (i, )
-#         bisimulation = bispy.dovier_piazza_policriti(nx_graph, initial_partition=partitions, is_integer_graph=True)
-#         return regenerate_graph(x, a, e, bisimulation)
-#
-#     else:
-#         temp_features = max(n_node_features, n_edge_features) + 1 # 1/0 to mark nodes edges, features
-#         temp_x = np.zeros((n_nodes + n_edges, temp_features))
-#         temp_x[:n_nodes] = np.hstack((np.ones((n_nodes, 1)), x,
-#                                       np.zeros((n_nodes, temp_features - (n_node_features + 1)))))
-#         temp_edges = []
-#         for k, (i, j) in enumerate(zip(*a.coords)):
-#             label = np.hstack((np.array([0], dtype=np.float32), e[k])) # 0 to mark edge
-#             temp_x[n_nodes+k] = np.hstack((label, np.zeros((temp_features - (n_edge_features + 1)))))
-#             temp_edges.append((i, n_nodes + k))
-#             temp_edges.append((n_nodes + k, j))
-#         temp_sources, temp_targets = zip(*sorted(temp_edges))
-#         temp_a = coo_matrix(([1] * len(temp_edges), (temp_sources, temp_targets)),
-#                             shape=(temp_x.shape[0], temp_x.shape[0]), dtype=np.float32)
-#         nx_graph = nx.DiGraph(temp_a)
-#         if mode == 'edges':
-#             uniques, inverse = np.unique(temp_x[n_nodes:].round(decimals=int(digits)), return_inverse=True, axis=0)
-#             num_partitions = len(uniques)
-#             partitions =  [() for _ in range(num_partitions)] + [tuple(i for i in range(n_nodes))]
-#             for i in range(n_edges):
-#                 partitions[inverse[i]] += (n_nodes + i,)
-#         else:
-#             uniques, inverse = np.unique(temp_x.round(decimals=int(digits)), return_inverse=True, axis=0)
-#             num_partitions = len(uniques)
-#             partitions = [() for _ in range(num_partitions)]
-#             for i in range(n_edges+n_nodes):
-#                 partitions[inverse[i]] += (i,)
-#         bisimulation = bispy.dovier_piazza_policriti(nx_graph, initial_partition=partitions, is_integer_graph=True)
-#         bisimulation = [partition for partition in bisimulation if all(i < n_nodes for i in partition)]
-#         return regenerate_graph(x, a, e, bisimulation)
-#
-#                                                     # n_nodes x n_node_features             # n_edges x n_edge_features
-# def merge_abstraction(graphs: list[Graph]) -> tuple[(np.ndarray, np.ndarray), coo_matrix, (np.ndarray,np.ndarray)]:
-#     xs, As, es = [], [], []
-#     for g in graphs:
-#         xs.append(g.x)
-#         As.append(g.a)
-#         es.append(g.e)
-#
-#     # merged node features
-#     n_nodes = reduce(lambda x, y: max(x, y.shape[0]), xs, 0)
-#     n_node_features = reduce(lambda x, y: max(x, y.shape[1]), xs, 0)
-#     new_x_lb = np.zeros((n_nodes, n_node_features))
-#     new_x_ub = np.zeros((n_nodes, n_node_features))
-#     for i in range(n_nodes):
-#         for j in range(n_node_features):
-#             values = [x[i][j] for x in xs if x.shape[0] > i and x.shape[1] > j]
-#             glb = reduce(min, values)
-#             lub = reduce(max, values)
-#             new_x_lb[i][j] = glb
-#             new_x_ub[i][j] = lub
-#
-#     # merged edge features
-#     disjoint_edge_sets = [set(zip(*a.coords)) for a in As]
-#     merged_edge_dict = {k: [] for k in set.union(*disjoint_edge_sets)}
-#     merged_edge_list = sorted(merged_edge_dict.keys())
-#     certain_edges = set.intersection(*disjoint_edge_sets)
-#     n_edges = len(merged_edge_dict)
-#     n_edge_features = reduce(lambda x, y: max(x, y.shape[1]), es, 0)
-#
-#     for a, e in zip(As, es):
-#         for i, edge in enumerate(zip(*a.coords)):
-#             merged_edge_dict[edge].append(e[i])
-#
-#     new_e1 = np.ones((n_edges, 1))
-#
-#     new_e2_lb = np.zeros((n_edges, n_edge_features))
-#     new_e_lb = np.hstack((new_e1, new_e2_lb))
-#
-#     new_e2_ub = np.zeros((n_edges, n_edge_features))
-#     new_e_ub = np.hstack((new_e1, new_e2_ub))
-#
-#     for i, edge in enumerate(merged_edge_list):
-#         if edge not in certain_edges:
-#             new_e_lb[i][0] = 0. # edge is uncertain in both lb and ub arrays
-#             new_e_ub[i][0] = 0.
-#         edge_feats = merged_edge_dict[edge]
-#         for j in range(n_edge_features):
-#             values = [e[j] for e in edge_feats if e.shape[0] > j]
-#             glb = reduce(min, values)
-#             lub = reduce(max, values)
-#             new_e_lb[i][j+1] = glb
-#             new_e_ub[i][j+1] = lub
-#
-#
-#     # merged adj matrix
-#     sources, targets = zip(*merged_edge_list)
-#     new_a = coo_matrix(([1] * n_edges, (sources, targets)), shape=(n_nodes, n_nodes), dtype=np.float32)
-#
-#     return (new_x_lb, new_x_ub), new_a, (new_e_lb, new_e_ub)
+class AbstractionSettings:
+    def __init__(self, node_delta, edge_delta, graph_abstraction, algorithm):
+        self.node_delta = node_delta
+        self.edge_delta = edge_delta
+        self.graph_abstraction = graph_abstraction
+        self.algorithm = algorithm
+
+    def abstract(self, graph):
+        return self.graph_abstraction.abstract(graph, node_delta=self.node_delta, edge_delta=self.edge_delta)
+
+    def concretize(self, abs_lb, abs_ub):
+        return self.graph_abstraction.concretize(abs_lb, abs_ub)
+
+
+class GraphAbstraction(abc.ABC):
+    @abc.abstractmethod
+    def abstract(self, graph, node_delta, edge_delta):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def concretize(self, abs_lb, abs_ub):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def handle_pooling(self, x):
+        raise NotImplementedError
+
+
+class NoAbstraction(GraphAbstraction):
+    def __init__(self, optimized_gcn=False):
+        self.optimized_gcn = optimized_gcn
+
+    def abstract(self, graph, node_delta, edge_delta):
+        abs_graph, y = (lirpa_domain.abstract_x(graph.x, node_delta), lirpa_domain.abstract_adj(graph.a), lirpa_domain.abstract_e(graph.e, edge_delta)), graph.y
+        ####################
+        if self.optimized_gcn:
+            new_a_low = deepcopy(graph.a)
+            new_a_high = deepcopy(graph.a)
+            new_a_low.data = np.squeeze(graph.e, axis=-1) - edge_delta
+            new_a_high.data = np.squeeze(graph.e, axis=-1) + edge_delta
+            e_low = np.expand_dims(new_a_low.todense(), axis=0)
+            e_high = np.expand_dims(new_a_high.todense(), axis=0)
+            e = np.zeros_like(e_low)
+            abs_e = lirpa_domain.abstract_e(e, x_L=e_low, x_U=e_high)
+            a = abs_graph[1][0]
+            edge_status = torch.zeros_like(abs_e.data)
+            edge_status[0][a[0], a[1]] = a[2].float()
+            abs_graph = abs_graph[0], edge_status, abs_e
+        ###################
+        return abs_graph
+
+    def concretize(self, abs_lb, abs_ub):
+        return abs_lb, abs_ub
+
+    def handle_pooling(self, x):
+        return x
+
+
+
+class EdgeAbstraction(GraphAbstraction):
+
+    def __init__(self, certain_edges: set[tuple[int, int]], add_missing_edges: bool, edge_label_generator: tuple[int, int] | str, optimized_gcn=False):
+        super().__init__()
+        self.certain_edges = certain_edges
+        self.add_missing_edges = add_missing_edges
+        self.edge_label_generator = edge_label_generator
+        self.optimized_gcn = optimized_gcn
+
+    def abstract(self, graph, node_delta, edge_delta):
+        (x, a, (e_lb, e_ub)), y = edge_abstraction(graph, self.certain_edges, self.add_missing_edges, self.edge_label_generator)
+        abs_x = lirpa_domain.abstract_x(x, node_delta)
+        abs_a = lirpa_domain.abstract_adj(a)
+        abs_e = lirpa_domain.abstract_e(np.zeros_like(e_lb), delta=edge_delta, x_L=e_lb, x_U=e_ub)
+        abs_graph = abs_x, abs_a, abs_e
+        ####################
+        if self.optimized_gcn:
+            new_a_low = deepcopy(a)
+            new_a_high = deepcopy(a)
+            new_a_low.data = np.squeeze(e_lb) - edge_delta
+            new_a_high.data = np.squeeze(e_ub) + edge_delta
+            unrolled_edge_status = abs_a[0][2]
+
+            # edge abstraction
+            new_a_low.data[unrolled_edge_status < 0] = np.clip(new_a_low.data[unrolled_edge_status < 0], a_max=0, a_min=None)
+            new_a_high.data[unrolled_edge_status < 0] = np.clip(new_a_high.data[unrolled_edge_status < 0], a_min=0, a_max=None)
+
+            e_low = np.expand_dims(new_a_low.todense(), axis=0)
+            e_high = np.expand_dims(new_a_high.todense(), axis=0)
+            e = np.zeros_like(e_low)
+            abs_e = lirpa_domain.abstract_e(e, x_L=e_low, x_U=e_high)
+
+            edge_status = torch.zeros(a.shape).unsqueeze(0)
+            edge_status[0][abs_a[0][0], abs_a[0][1]] = abs_a[0][2].float()
+
+            abs_graph = abs_graph[0], edge_status, abs_e
+        ###################
+        return abs_graph
+
+    def concretize(self, abs_lb, abs_ub):
+        return abs_lb, abs_ub
+
+    def handle_pooling(self, x):
+        return x
+
+class BisimAbstraction(GraphAbstraction):
+    def __init__(self, direction, optimized_gcn=False):
+        super().__init__()
+        self.direction = direction
+        self.bisim_map = None
+        self.optimized_gcn = optimized_gcn
+
+    def abstract(self, graph, node_delta, edge_delta):
+        bisim_map, ((abs_x_lb, abs_x_ub), abs_a, abs_e), y = bisim_abstraction(graph, self.direction)
+        self.bisim_map = bisim_map
+        abs_graph = lirpa_domain.abstract_x(np.zeros_like(abs_x_lb), delta=node_delta, x_L=abs_x_lb, x_U=abs_x_ub), lirpa_domain.abstract_adj(abs_a), lirpa_domain.abstract_e(abs_e, edge_delta)
+        ####################
+        if self.optimized_gcn:
+            new_a_low = deepcopy(abs_a)
+            new_a_high = deepcopy(abs_a)
+            new_a_low.data = np.squeeze(abs_e, axis=-1) - edge_delta
+            new_a_high.data = np.squeeze(abs_e, axis=-1) + edge_delta
+            e_low = np.expand_dims(new_a_low.todense(), axis=0)
+            e_high = np.expand_dims(new_a_high.todense(), axis=0)
+            e = np.zeros_like(e_low)
+            abs_e = lirpa_domain.abstract_e(e, x_L=e_low, x_U=e_high)
+            a = abs_graph[1][0]
+            edge_status = torch.zeros_like(abs_e.data)
+            edge_status[0][a[0], a[1]] = a[2].float()
+            abs_graph = abs_graph[0], edge_status, abs_e
+        ###################
+        return abs_graph
+
+    def concretize(self, abs_lb, abs_ub):
+        indexes = sorted(self.bisim_map.orig_to_part_mapping.values())
+        if abs_lb.shape[1] > 1:
+            lb = abs_lb[indexes]
+            ub = abs_ub[indexes]
+        else:  # Pooling output
+            lb = abs_lb
+            ub = abs_ub
+        return lb, ub
+
+    def handle_pooling(self, x):
+        return self.bisim_map.multiply(x)
