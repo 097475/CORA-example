@@ -12,10 +12,11 @@ from spektral.data import Graph
 from spektral.utils import normalized_adjacency, degree_power
 
 from forward_abstract_interpretation import lirpa_domain
+from forward_abstract_interpretation.spanning_tree import generate_uncertain_edge_set
 from weighted_bisimulation import lumpability
 
 
-def edge_abstraction(graph: Graph, certain_edges: set[tuple[int, int]], add_missing_edges: bool, edge_label_generator: tuple[float, float] | Literal['GCN'] = (0, 1)):
+def edge_abstraction(graph: Graph, uncertain_edges: set[tuple[int, int]], add_missing_edges: bool, edge_label_generator: tuple[float, float] | Literal['GCN'] = (0, 1)):
     new_x = graph.x # x stays the same
     new_y = graph.y  # y stays the same
 
@@ -23,7 +24,7 @@ def edge_abstraction(graph: Graph, certain_edges: set[tuple[int, int]], add_miss
     if not add_missing_edges:
         new_a = deepcopy(graph.a)
         for i, e in enumerate(zip(*graph.a.coords)):
-            if e not in certain_edges:
+            if e in uncertain_edges:
                 new_a.data[i] = -1.
     else:
         new_a = coo_matrix(([-1]*math.prod(graph.a.shape),
@@ -31,7 +32,7 @@ def edge_abstraction(graph: Graph, certain_edges: set[tuple[int, int]], add_miss
                              [i % graph.a.shape[0] for i in range(math.prod(graph.a.shape))])),
                    shape=graph.a.shape, dtype=graph.a.dtype)
         for i, e in enumerate(zip(*new_a.coords)):
-            if e in certain_edges:
+            if e not in uncertain_edges:
                 new_a.data[i] = 1.
 
     # Generate new edge labels
@@ -45,7 +46,7 @@ def edge_abstraction(graph: Graph, certain_edges: set[tuple[int, int]], add_miss
                 new_e_lb[i] = edge_label_dict[e]
                 new_e_ub[i] = edge_label_dict[e]
     elif edge_label_generator == 'GCN':     # For a safe bound, consider upper bound = 1.0 and lower bound = 1/n_nodes
-        assert {(i, i) for i in range(graph.n_nodes)}.issubset(certain_edges) # self loops must always be certain
+        # assert {(i, i) for i in range(graph.n_nodes)}.issubset(certain_edges) # self loops must always be certain
         a_lb_data = np.where(new_a.data == -1, 1, new_a.data)
         a_lb = deepcopy(new_a)
         a_lb.data = a_lb_data
@@ -56,11 +57,11 @@ def edge_abstraction(graph: Graph, certain_edges: set[tuple[int, int]], add_miss
         a_ub.data = a_ub_data
         # upper bound for uncertain edges can be computed by 1/sqrt(1+crt_i) * 1/sqrt(crt_j)
         # upper bound for certain edges can be computed by 1/sqrt(crt_i) * 1/sqrt(crt_j)
-        crt = degree_power(a_ub, 1).data.squeeze()
+        crt = degree_power(a_ub, 1).data.squeeze(axis=0)
         new_e_ub = np.zeros_like(new_e_lb)
         for k, e in enumerate(zip(*new_a.coords)):
             i, j = e
-            if e not in certain_edges:
+            if e in uncertain_edges:
                 new_e_ub[k] = np.array([1/math.sqrt(1 + crt[i]) * 1/math.sqrt(crt[j])])
             else:
                 new_e_ub[k] = np.array([1 / math.sqrt(crt[i]) * 1 / math.sqrt(crt[j])])
@@ -204,15 +205,17 @@ class NoAbstraction(GraphAbstraction):
 
 class EdgeAbstraction(GraphAbstraction):
 
-    def __init__(self, certain_edges: set[tuple[int, int]], add_missing_edges: bool, edge_label_generator: tuple[int, int] | str, optimized_gcn=False):
+    def __init__(self, uncertain_edges: set[tuple[int, int]] | float, add_missing_edges: bool, edge_label_generator: tuple[int, int] | str, optimized_gcn=False):
         super().__init__()
-        self.certain_edges = certain_edges
+        self.uncertain_edges = uncertain_edges if isinstance(uncertain_edges, set) else set()
+        self.ratio = uncertain_edges if isinstance(uncertain_edges, float) else None
         self.add_missing_edges = add_missing_edges
         self.edge_label_generator = edge_label_generator
         self.optimized_gcn = optimized_gcn
 
+
     def abstract(self, graph, node_delta, edge_delta):
-        (x, a, (e_lb, e_ub)), y = edge_abstraction(graph, self.certain_edges, self.add_missing_edges, self.edge_label_generator)
+        (x, a, (e_lb, e_ub)), y = edge_abstraction(graph, self.uncertain_edges, self.add_missing_edges, self.edge_label_generator)
         abs_x = lirpa_domain.abstract_x(x, node_delta)
         abs_a = lirpa_domain.abstract_adj(a)
         abs_e = lirpa_domain.abstract_e(np.zeros_like(e_lb), delta=edge_delta, x_L=e_lb, x_U=e_ub)
@@ -221,8 +224,8 @@ class EdgeAbstraction(GraphAbstraction):
         if self.optimized_gcn:
             new_a_low = deepcopy(a)
             new_a_high = deepcopy(a)
-            new_a_low.data = np.squeeze(e_lb) - edge_delta
-            new_a_high.data = np.squeeze(e_ub) + edge_delta
+            new_a_low.data = np.squeeze(e_lb,axis=-1) - edge_delta
+            new_a_high.data = np.squeeze(e_ub, axis=-1) + edge_delta
             unrolled_edge_status = abs_a[0][2]
 
             # edge abstraction
@@ -246,6 +249,10 @@ class EdgeAbstraction(GraphAbstraction):
 
     def handle_pooling(self, x):
         return x
+
+    def generate_uncertain_edge_set(self, a):
+        self.uncertain_edges = generate_uncertain_edge_set(self.ratio, a)
+
 
 class BisimAbstraction(GraphAbstraction):
     def __init__(self, direction, optimized_gcn=False):

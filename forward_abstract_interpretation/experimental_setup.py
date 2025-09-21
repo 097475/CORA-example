@@ -276,21 +276,6 @@ def print_bounds(lb, ub, pred, truth):
     print()
 
 
-# def check_soundness(pred, lb, ub):
-#     eps = interpreter.atol
-#     pred = pred[0] if isinstance(pred, tuple) else pred
-#     pred = pred[0] if pred.shape.ndims == 3 else pred
-#     lb = lb[0] if lb.ndim == 3 else lb
-#     ub = ub[0] if ub.ndim == 3 else ub
-#     for i, (prow, lrow, urow) in enumerate(zip(pred, lb, ub)):
-#         for j, (p, l, u) in enumerate(zip(prow, lrow, urow)):
-#             assert l - eps <= p <= u + eps, "Unsound result at {0},{1}: {2} <!= {3} <!= {4}".format(i, j, l, p, u)
-#     print('Soundness check passed')
-
-
-# def is_overlapping(intv1, intv2):
-#     return intv1[0] <= intv2[1] and intv1[1] >= intv2[0]
-
 def check_robustness(pred_lb, pred_ub, true_idx, n_classes):
     true_label_lb = pred_lb[true_idx]
     overlaps = False
@@ -308,11 +293,17 @@ def check_robustness(pred_lb, pred_ub, true_idx, n_classes):
 def run_graph_task(model, abstract_model, dataset, abs_settings):
     loader = MultipleGraphLoader(dataset, node_level=False, shuffle=False, epochs=1, batch_size=1)
 
-    for graph_tf, graph_np in zip(loader.load(), dataset):
+    for graph_tf, graph_np in tqdm(zip(loader.load(), dataset)):
         # Conc exe
         (conc_x, conc_a, conc_e, conc_i), y = graph_tf
         out = model((conc_x, conc_a, conc_e, conc_i))
         prediction = (out[0][0].numpy())
+
+        tqdm.write(f"\nAnalyzing graph with {graph_np.n_nodes} nodes")
+
+        # Generate uncertain edge set for this graph
+        if isinstance(abs_settings.graph_abstraction, EdgeAbstraction):
+            abs_settings.graph_abstraction.generate_uncertain_edge_set(graph_np.a)
 
         ### Setting up graph
         abs_x, abs_a, abs_e = abs_settings.abstract(graph_np)
@@ -325,30 +316,16 @@ def run_graph_task(model, abstract_model, dataset, abs_settings):
 
         abs_prediction_lb = lb[0]
         abs_prediction_ub = ub[0]
-        true_label = graph_np.y
+
+        tqdm.write(f"\nConcrete model output: {prediction.tolist()}")
+        tqdm.write(f"Computed bounds: {list(zip(abs_prediction_lb.tolist(), abs_prediction_ub.tolist()))}")
 
         check_robustness(abs_prediction_lb, abs_prediction_ub, np.argmax(prediction), dataset.n_labels)
-
-
-        # if not skip_uncorrect or np.argmax(prediction) == np.argmax(true_label):
-        #     idx = np.argmax(true_label)
-        #     true_label_lb, true_label_ub = abs_prediction_lb[idx], abs_prediction_ub[idx]
-        #     overlaps = False
-        #     for i in range(len(true_label)):
-        #         if i != idx and is_overlapping((true_label_lb, true_label_ub), (abs_prediction_lb[i], abs_prediction_ub[i])):
-        #             print("Failed to prove the property")
-        #             overlaps = True
-        #             break
-        #     if not overlaps:
-        #         print("Property proved")
-        # else:
-        #     print("Skipping because the model failed to predict correctly")
 
 
 def run_node_task(model, abstract_model, dataset, abs_settings):
     graph_tf = SingleGraphLoader(dataset, epochs=1).load().__iter__().__next__()
     graph_np = dataset[0]
-    true_labels = graph_np.y
 
     # Conc exe
     (conc_x, conc_a, conc_e), y = graph_tf
@@ -359,6 +336,11 @@ def run_node_task(model, abstract_model, dataset, abs_settings):
         # Generate cut graph
         new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
         tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
+
+        # Regenerate uncertain edge set after cut
+        if isinstance(abs_settings.graph_abstraction, EdgeAbstraction):
+            abs_settings.graph_abstraction.generate_uncertain_edge_set(new_graph.a)
+
         node_list = sorted(list(set(new_graph.a.row.tolist())))
         mapping = lambda xx: node_list.index(xx)
         mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
@@ -387,95 +369,6 @@ def run_node_task(model, abstract_model, dataset, abs_settings):
         check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
 
 
-# def run_node_task_gcn_optimized(model, abstract_model, dataset, abs_settings, skip_uncorrect=True):
-#     graph_tf = SingleGraphLoader(dataset, epochs=1).load().__iter__().__next__()
-#     graph_np = dataset[0]
-#     true_labels = graph_np.y
-#
-#
-#     prod = Phi(lambda i, e, j: i * e)
-#     sm = Sigma(lambda m, i, n, x: tf.math.unsorted_segment_sum(m, i, n))
-#     dense = PsiLocal.make_parametrized('dense', lambda channels: tf.keras.layers.Dense(int(channels), activation='relu', use_bias=True))
-#     out = PsiLocal.make('out', tf.keras.layers.Dense(dataset.n_labels, activation='linear', use_bias=True))
-#     sum_pool = PsiGlobal(single_op=lambda x: tf.reduce_sum(x, axis=0, keepdims=False), multiple_op=lambda x, i: tf.math.segment_sum(x, i), name='SumPooling')
-#     mean_pool = PsiGlobal(single_op=lambda x: tf.reduce_mean(x, axis=0, keepdims=False), multiple_op=lambda x, i: tf.math.segment_sum(x, i), name='MeanPooling')
-#
-#     weights = model.weights
-#     n_gcn_layers = len(weights) // 2
-#     exprs = [mg_reconstructor.reconstruct(model.expr)] + [';'.join(['<x|+ ; dense[32]'] * i) for i in range(1, n_gcn_layers)]
-#     abs_exprs = ['<x|+ ; dense[32]' for _ in range(n_gcn_layers-1)] + ['<x|+ ; out']
-#     cut_models = [get_gcn(dataset, expr) for expr in exprs]
-#     sizes = [dataset.n_node_features, 32]
-#     abs_models = []
-#     i = 0
-#     for expr, input_size in zip(abs_exprs, sizes):
-#         config = CompilerConfig.xae_config(NodeConfig(tf.float32, input_size), EdgeConfig(tf.float32, 1), tf.float32, {'float': 0.000001})
-#         compiler = MGCompiler({'dense': dense, 'out': out, 'sum': sum_pool, 'mean': mean_pool}, {'+': sm}, {'x': prod}, config)
-#         expr_model = compiler.compile(expr)
-#         model_weights = weights[i:i+2]
-#         expr_model.set_weights(model_weights)
-#         abstract_model_t = get_abstract_model(expr_model, abs_settings)
-#         abs_models.append(abstract_model_t)
-#         i += 2
-#
-#     # Conc exe
-#     (conc_x, conc_a, conc_e), y = graph_tf
-#     out = model((conc_x, conc_a, conc_e))
-#     predictions = out[0].numpy()
-#
-#     for node in tqdm(range(0, graph_np.n_nodes)):
-#         mapping = None
-#         for i, (cut_model, abs_model) in enumerate(zip(cut_models, abs_models)):
-#             # Generate cut graph
-#             new_graph = MGExplainer(cut_model).explain(node, (conc_x, conc_a, conc_e), None, False)
-#             print(new_graph.n_nodes)
-#             old_mapping = mapping
-#             node_list = sorted(list(set(new_graph.a.row.tolist())))
-#             mapping = lambda xx: node_list.index(xx)
-#             mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
-#             new_graph.a = mapped_a
-#
-#             ### Setting up graph
-#             abs_x, abs_a, abs_e = abs_settings.abstract(new_graph)
-#             if i > 0:
-#                 x_lb = lb[[old_mapping(n) for n in node_list]]
-#                 x_ub = ub[[old_mapping(n) for n in node_list]]
-#                 abs_x = lirpa_domain.abstract_x(np.zeros_like(x_lb), x_L=x_lb.numpy(), x_U=x_ub.numpy())
-#
-#
-#             # import timeit
-#             # print(timeit.repeat(lambda: run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm), repeat=3, number=1))
-#
-#             ### Run
-#             lirpa_model = BoundedModule(abs_model, (torch.empty_like(abs_x), abs_a, torch.empty_like(abs_e)), device=abs_a.device, verbose=True)
-#             lb, ub, A = lirpa_model.compute_bounds(x=(abs_x, abs_a, abs_e), method=abs_settings.algorithm, IBP=True, return_A=True, need_A_only=True, needed_A_dict={lirpa_model.final_name: ['/x.1', '/e.1']})
-#             abs_lb, abs_ub = lb.detach()[0], ub.detach()[0]
-#
-#
-#             ### Concretize
-#             lb, ub = abs_settings.concretize(abs_lb, abs_ub)
-#
-#         abs_prediction_lb = lb
-#         abs_prediction_ub = ub
-#
-#         print(abs_prediction_lb, abs_prediction_ub)
-#
-#         if not skip_uncorrect or np.argmax(predictions[node]) == np.argmax(true_labels[node]):
-#             idx = np.argmax(true_labels[node])
-#             abs_prediction_lb_node, abs_prediction_ub_node = abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)]
-#             true_label_lb, true_label_ub = abs_prediction_lb_node[idx], abs_prediction_ub_node[idx]
-#             overlaps = False
-#             for i in range(len(true_labels[node])):
-#                 if i != idx and is_overlapping((true_label_lb, true_label_ub), (abs_prediction_lb_node[i], abs_prediction_ub_node[i])):
-#                     print("Failed to prove the property")
-#                     overlaps = True
-#                     break
-#             if not overlaps:
-#                 print("Property proved")
-#         else:
-#             print("Skipping because the model failed to predict correctly")
-#         break
-
 # Node task
 def figure_setup():
     dataset = DatasetFigure(transforms=[preprocess_gcn_mg, CastTo(np.float32)])
@@ -485,10 +378,12 @@ def figure_setup():
     model.set_weights([np.array([[1., 1.], [-1., 1]]), np.array([0., 0.]), np.array([[1., 1.], [-1., 1]]), np.array([0., 0.])])
     model.summary()
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'alpha-crown')
-    # abs_settings = AbstractionSettings(0.1, 0.,  EdgeAbstraction({(0, 0), (1, 1), (2, 2)}, True, edge_label_generator='GCN', optimized_gcn=True), 'IBP')
+    # abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'alpha-crown')
+    abs_settings = AbstractionSettings(0.1, 0.,  EdgeAbstraction(0.5, False, edge_label_generator='GCN', optimized_gcn=True), 'IBP')
     # abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), 'backward')
     abstract_model = get_abstract_model(model, abs_settings)
+
+
     run_node_task(model, abstract_model, dataset, abs_settings)
 
 
@@ -576,7 +471,6 @@ def cora_setup():
     abstract_model = get_abstract_model(model, abs_settings)
 
     run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
-    # run_node_task_gcn_optimized(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
 
 # Graph task
 def enzymes_setup():
