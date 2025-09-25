@@ -7,13 +7,17 @@ from spektral.transforms import OneHotLabels
 from spektral.utils import gcn_filter
 import numpy as np
 import tensorflow as tf
+import torch
 import os
+import time
+import csv
 # os.environ['AUTOLIRPA_DEBUG'] = '1'
 from keras import losses, optimizers, callbacks
 from tqdm import tqdm
 
 from lirpa_domain import interpreter, run_abstract_model, check_soundness
 from graph_abstraction import AbstractionSettings, NoAbstraction, EdgeAbstraction, BisimAbstraction
+
 
 
 class DatasetTest(Dataset):
@@ -109,6 +113,13 @@ class OGBDataset(OGB):
         # Super call
         transforms = kwargs.pop('transforms', [])
         super().__init__(dataset, transforms=[OneHotLabels(depth=dataset.num_classes)] + transforms, **kwargs)
+
+
+def remove_last_three_feats(graph):
+    graph.x = graph.x[:, :-3]
+    return graph
+
+
 
 def preprocess_gcn_mg(graph):
     new_a = gcn_filter(graph.a)
@@ -215,6 +226,7 @@ def get_gcn(dataset, expr):
     prod = Phi(lambda i, e, j: i * e)
     sm = Sigma(lambda m, i, n, x: tf.math.unsorted_segment_sum(m, i, n))
     dense = PsiLocal.make_parametrized('dense', lambda channels: tf.keras.layers.Dense(int(channels), activation='relu', use_bias=True))
+    lin = PsiLocal.make_parametrized('dense', lambda channels: tf.keras.layers.Dense(int(channels), activation=None, use_bias=True))
     out = PsiLocal.make('out', tf.keras.layers.Dense(dataset.n_labels, activation='linear', use_bias=True))
     sum_pool = PsiGlobal(single_op=lambda x: tf.reduce_sum(x, axis=0, keepdims=False), multiple_op=lambda x, i: tf.math.segment_sum(x, i), name='SumPooling')
     mean_pool = PsiGlobal(single_op=lambda x: tf.reduce_mean(x, axis=0, keepdims=False), multiple_op=lambda x, i: tf.math.segment_sum(x, i), name='MeanPooling')
@@ -222,7 +234,7 @@ def get_gcn(dataset, expr):
         config = CompilerConfig.xaei_config(NodeConfig(tf.float32, dataset.n_node_features), EdgeConfig(tf.float32, 1), tf.float32, {'float': 0.000001})
     else:
         config = CompilerConfig.xae_config(NodeConfig(tf.float32, dataset.n_node_features), EdgeConfig(tf.float32, 1), tf.float32, {'float': 0.000001})
-    compiler = MGCompiler({'dense': dense, 'out': out, 'sum': sum_pool, 'mean': mean_pool}, {'+': sm}, {'x': prod}, config)
+    compiler = MGCompiler({'dense': dense, 'out': out, 'lin': lin, 'sum': sum_pool, 'mean': mean_pool}, {'+': sm}, {'x': prod}, config)
     model = compiler.compile(expr)
     return model
 
@@ -285,15 +297,23 @@ def check_robustness(pred_lb, pred_ub, true_idx, n_classes):
             if true_label_lb <= other_label_ub:
                 overlaps = True
                 print("Failed to prove the property")
-                break
+                return "Fail"
     if not overlaps:
         print("Property proved")
+        return "Pass"
 
 
-def run_graph_task(model, abstract_model, dataset, abs_settings):
+def run_graph_task(model, abstract_model, dataset, abs_settings, repeats=None):
     loader = MultipleGraphLoader(dataset, node_level=False, shuffle=False, epochs=1, batch_size=1)
 
-    for graph_tf, graph_np in tqdm(zip(loader.load(), dataset)):
+    results = []
+
+    iterations = len(dataset) if repeats is None else repeats
+    pbar = tqdm(total=iterations)
+    i = 0
+    for graph_tf, graph_np in zip(loader.load(), dataset):
+        pbar.update(1)
+
         # Conc exe
         (conc_x, conc_a, conc_e, conc_i), y = graph_tf
         out = model((conc_x, conc_a, conc_e, conc_i))
@@ -309,7 +329,14 @@ def run_graph_task(model, abstract_model, dataset, abs_settings):
         abs_x, abs_a, abs_e = abs_settings.abstract(graph_np)
 
         ### Run
+        print("Running analysis")
+        start = time.perf_counter()
         abs_lb, abs_ub = run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm)
+        end = time.perf_counter()
+
+        elapsed_time = end - start
+
+        print(f"Execution time: {elapsed_time:.6f} seconds")
 
         ### Concretize
         lb, ub = abs_settings.concretize(abs_lb, abs_ub)
@@ -320,42 +347,58 @@ def run_graph_task(model, abstract_model, dataset, abs_settings):
         tqdm.write(f"\nConcrete model output: {prediction.tolist()}")
         tqdm.write(f"Computed bounds: {list(zip(abs_prediction_lb.tolist(), abs_prediction_ub.tolist()))}")
 
-        check_robustness(abs_prediction_lb, abs_prediction_ub, np.argmax(prediction), dataset.n_labels)
+        outcome = check_robustness(abs_prediction_lb, abs_prediction_ub, np.argmax(prediction), dataset.n_labels)
+
+        results.append((outcome, elapsed_time))
+
+        i = i + 1
+        if i >= iterations:
+            break
+    pbar.close()
+    return results
 
 
-def run_node_task(model, abstract_model, dataset, abs_settings):
+def run_node_task(model, abstract_model, dataset, abs_settings, repeats=None):
     graph_tf = SingleGraphLoader(dataset, epochs=1).load().__iter__().__next__()
     graph_np = dataset[0]
+
+    results = []
 
     # Conc exe
     (conc_x, conc_a, conc_e), y = graph_tf
     out = model((conc_x, conc_a, conc_e))
     predictions = out[0].numpy()
 
-    for node in tqdm(range(graph_np.n_nodes)):
+    iterations = graph_np.n_nodes if repeats is None else repeats
+
+    for node in tqdm(range(iterations)):
         # Generate cut graph
         new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
         tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
-
-        # Regenerate uncertain edge set after cut
-        if isinstance(abs_settings.graph_abstraction, EdgeAbstraction):
-            abs_settings.graph_abstraction.generate_uncertain_edge_set(new_graph.a)
+        conc_graph_n_nodes = new_graph.n_nodes
 
         node_list = sorted(list(set(new_graph.a.row.tolist())))
         mapping = lambda xx: node_list.index(xx)
         mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
         new_graph.a = mapped_a
 
+        # Regenerate uncertain edge set after cut
+        if isinstance(abs_settings.graph_abstraction, EdgeAbstraction):
+            abs_settings.graph_abstraction.generate_uncertain_edge_set(new_graph.a)
+
         ### Setting up graph
         abs_x, abs_a, abs_e = abs_settings.abstract(new_graph)
-
-        # import timeit
-        # print(timeit.repeat(lambda: run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm), repeat=3, number=1))
+        abs_graph_n_nodes = len(abs_x[0])
 
         ### Run
-
+        print("Running analysis")
+        start = time.perf_counter()
         abs_lb, abs_ub = run_abstract_model(abstract_model, abs_x, abs_a, abs_e, abs_settings.algorithm)
+        end = time.perf_counter()
 
+        elapsed_time = end - start
+
+        print(f"Execution time: {elapsed_time:.6f} seconds")
 
         ### Concretize
         lb, ub = abs_settings.concretize(abs_lb, abs_ub)
@@ -366,7 +409,10 @@ def run_node_task(model, abstract_model, dataset, abs_settings):
         tqdm.write(f"\nConcrete model output at node {node}: {predictions[node].tolist()}")
         tqdm.write(f"Computed bounds at node {node}: {list(zip(abs_prediction_lb[mapping(node)].tolist(), abs_prediction_ub[mapping(node)].tolist()))}")
 
-        check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
+        outcome = check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
+        results.append((outcome, elapsed_time) + ((conc_graph_n_nodes, abs_graph_n_nodes) if isinstance(abs_settings.graph_abstraction, BisimAbstraction) else ()))
+
+    return results
 
 
 # Node task
@@ -447,70 +493,125 @@ def arxiv_setup():
     dataset = OGBDataset(NodePropPredDataset('ogbn-arxiv'), transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
-    model = get_gcn(dataset, '<x|+ ; dense[32] ; <x|+ ; out')
+    model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'backward')
-    abstract_model = get_abstract_model(model, abs_settings)
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
+            print("Running experiments with frac: {}".format(frac))
+            abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
+            abstract_model = get_abstract_model(model, abs_settings)
+            res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-    run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
+            with open('data\\arxiv_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerows(res)
+
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
+        abstract_model = get_abstract_model(model, abs_settings)
+        res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+        with open('data\\arxiv_' + method + '_bisim.csv', 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows(res)
 
 # Node task
 def cora_setup():
     dataset = Citation('cora', transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
-    model = get_gcn(dataset, '<x|+ ; dense[32] ; <x|+ ; out')
+    model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(optimized_gcn=True), 'backward')
-    abstract_model = get_abstract_model(model, abs_settings)
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
+            print("Running experiments with frac: {}".format(frac))
+            abs_settings = AbstractionSettings(0, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
+            abstract_model = get_abstract_model(model, abs_settings)
+            res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-    run_node_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
+            with open('data\cora_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerows(res)
+
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
+        abstract_model = get_abstract_model(model, abs_settings)
+        res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+        with open('data\cora_' + method + '_bisim.csv', 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerows(res)
 
 # Graph task
 def enzymes_setup():
     dataset = TUDataset('ENZYMES', transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
-    model = get_gcn(dataset, '<x|+ ; dense[32] ; <x|+ ; dense[32] ; <x|+ ; dense[32] ;  sum ; dense[128] ; out')
+    model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; lin[64] ; sum ; out')
     model.summary()
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(), 'backward')
-    abstract_model = get_abstract_model(model, abs_settings)
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
+            print("Running experiments with frac: {}".format(frac))
+            abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
+            abstract_model = get_abstract_model(model, abs_settings)
+            res = run_graph_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-    run_graph_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
+            with open('data\enzymes_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerows(res)
 
 # Graph task
 def proteins_setup():
-    dataset = TUDataset('PROTEINS_full', transforms=[preprocess_gcn_mg, CastTo(np.float32)])
-    # TODO: remove last three features
+    dataset = TUDataset('PROTEINS_full', transforms=[remove_last_three_feats, preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
-    model = get_gcn(dataset, '<x|+ ; dense[32] ; <x|+ ; dense[32] ; <x|+ ; dense[32] ;  mean ; dense[128] ; out')
+    model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; lin[64] ; sum ; out')
     model.summary()
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    abs_settings = AbstractionSettings(0.1, 0.1, NoAbstraction(), 'backward')
-    abstract_model = get_abstract_model(model, abs_settings)
+    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+        print("Running experiments with methods: {}".format(method))
+        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
+            print("Running experiments with frac: {}".format(frac))
+            abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
+            abstract_model = get_abstract_model(model, abs_settings)
+            res = run_graph_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-    run_graph_task(model, abstract_model, dataset, abs_settings, skip_uncorrect=True)
+            with open('data\proteins_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerows(res)
 
 
 if __name__ == '__main__':
-    # METHODS
-    # ibp
-    # ibp+crown
-    # crown
-    # alpha-crown
-    figure_setup()
+    os.makedirs('data', exist_ok=True)
+
+    # 1. Is CUDA available at all?
+    print(torch.cuda.is_available())  # True if PyTorch can see your GPU
+
+    # 2. How many GPUs are visible?
+    print(torch.cuda.device_count())  # e.g. 1
+
+    # 3. Which GPU is currently active?
+    print(torch.cuda.current_device())  # e.g. 0
+
+    # 4. What’s the GPU name?
+    print(torch.cuda.get_device_name(0))  # e.g. "NVIDIA GeForce RTX 3080"
+
+
+    # figure_setup()
     # for _ in range(1):
     # debug_setup()
     # arxiv_setup()

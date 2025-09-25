@@ -2,6 +2,9 @@ import random
 
 import numpy as np
 
+from collections import deque
+
+
 def minimum_spanning_tree(adj_matrix, start=0):
     n = adj_matrix.shape[0]
     visited = [False] * n
@@ -16,7 +19,7 @@ def minimum_spanning_tree(adj_matrix, start=0):
         for v in range(n):
             if (adj_matrix[u, v] == 1 or adj_matrix[v, u] == 1) and not visited[v]:
                 visited[v] = True
-                edges.add((min(u, v), max(u, v)))
+                edges.add((u, v) if adj_matrix[u, v] == 1 else (v, u))
                 queue.append(v)
 
     return edges
@@ -26,9 +29,9 @@ def generate_uncertain_edge_set(ratio, adj):
     edges = set(zip(*adj.coords))
     adj = adj.todense()
     n_nodes = adj.shape[0]
-    indegrees = adj.sum(axis=0)
-    outdegrees = adj.sum(axis=1)  # Sum rows
-    start_node = np.argmax(indegrees + outdegrees)
+    indegrees = np.array(adj.sum(axis=0)).flatten()
+    outdegrees = np.array(adj.sum(axis=1)).flatten()
+    start_node = int(np.argmax(indegrees + outdegrees))
     mst = minimum_spanning_tree(adj, start_node)
     forbidden_edges = mst.union({(i, i) for i in range(n_nodes)})
     assert forbidden_edges.issubset(edges)

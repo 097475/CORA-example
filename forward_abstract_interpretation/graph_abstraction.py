@@ -129,7 +129,7 @@ def regenerate_graph(graph, bisimulation, lumped_matrix):
 
 def bisim_abstraction(graph: Graph, direction: Literal['fw', 'bw', 'fwbw']):
     a = deepcopy(graph.a)
-    a.data = graph.e.squeeze()
+    a.data = graph.e.squeeze(axis=-1)
     if direction == 'fw':
         bisim, lumped_matrix = lumpability(a, direction)
     elif direction == 'bw':
