@@ -358,7 +358,7 @@ def run_graph_task(model, abstract_model, dataset, abs_settings, repeats=None):
     return results
 
 
-def run_node_task(model, abstract_model, dataset, abs_settings, repeats=None):
+def run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze):
     graph_tf = SingleGraphLoader(dataset, epochs=1).load().__iter__().__next__()
     graph_np = dataset[0]
 
@@ -369,9 +369,7 @@ def run_node_task(model, abstract_model, dataset, abs_settings, repeats=None):
     out = model((conc_x, conc_a, conc_e))
     predictions = out[0].numpy()
 
-    iterations = graph_np.n_nodes if repeats is None else repeats
-
-    for node in tqdm(range(iterations)):
+    for node in tqdm(nodes_to_analyze):
         # Generate cut graph
         new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
         tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
@@ -387,8 +385,13 @@ def run_node_task(model, abstract_model, dataset, abs_settings, repeats=None):
             abs_settings.graph_abstraction.generate_uncertain_edge_set(new_graph.a)
 
         ### Setting up graph
+        start_abs = time.perf_counter()
         abs_x, abs_a, abs_e = abs_settings.abstract(new_graph)
+        end_abs = time.perf_counter()
         abs_graph_n_nodes = len(abs_x[0])
+        abs_graph_time = end_abs - start_abs
+
+
 
         ### Run
         print("Running analysis")
@@ -410,7 +413,7 @@ def run_node_task(model, abstract_model, dataset, abs_settings, repeats=None):
         tqdm.write(f"Computed bounds at node {node}: {list(zip(abs_prediction_lb[mapping(node)].tolist(), abs_prediction_ub[mapping(node)].tolist()))}")
 
         outcome = check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
-        results.append((outcome, elapsed_time) + ((conc_graph_n_nodes, abs_graph_n_nodes) if isinstance(abs_settings.graph_abstraction, BisimAbstraction) else ()))
+        results.append((outcome, elapsed_time) + ((conc_graph_n_nodes, abs_graph_n_nodes, abs_graph_time) if isinstance(abs_settings.graph_abstraction, BisimAbstraction) else ()))
 
     return results
 
@@ -493,6 +496,9 @@ def arxiv_setup():
     dataset = OGBDataset(NodePropPredDataset('ogbn-arxiv'), transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
+    rng = np.random.default_rng(seed=42)
+    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=50).tolist()
+
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
 
@@ -504,7 +510,7 @@ def arxiv_setup():
             print("Running experiments with frac: {}".format(frac))
             abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
             abstract_model = get_abstract_model(model, abs_settings)
-            res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+            res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
 
             with open('data\\arxiv_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
@@ -524,6 +530,9 @@ def cora_setup():
     dataset = Citation('cora', transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
 
+    rng = np.random.default_rng(seed=42)
+    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=50).tolist()
+
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
 
@@ -535,7 +544,7 @@ def cora_setup():
             print("Running experiments with frac: {}".format(frac))
             abs_settings = AbstractionSettings(0, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
             abstract_model = get_abstract_model(model, abs_settings)
-            res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+            res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
 
             with open('data\cora_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
@@ -554,6 +563,9 @@ def cora_setup():
 def enzymes_setup():
     dataset = TUDataset('ENZYMES', transforms=[preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
+
+    rng = np.random.default_rng(seed=42)
+    rng.shuffle(dataset)
 
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; lin[64] ; sum ; out')
     model.summary()
@@ -576,6 +588,9 @@ def enzymes_setup():
 def proteins_setup():
     dataset = TUDataset('PROTEINS_full', transforms=[remove_last_three_feats, preprocess_gcn_mg, CastTo(np.float32)])
     print_dataset_info(dataset)
+
+    rng = np.random.default_rng(seed=42)
+    rng.shuffle(dataset)
 
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; lin[64] ; sum ; out')
     model.summary()
