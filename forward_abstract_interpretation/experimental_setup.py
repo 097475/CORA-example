@@ -504,7 +504,7 @@ def arxiv_setup():
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         for frac in [0., 0.001, 0.005, 0.01, 0.05]:
             print("Running experiments with frac: {}".format(frac))
@@ -512,16 +512,16 @@ def arxiv_setup():
             abstract_model = get_abstract_model(model, abs_settings)
             res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
 
-            with open('data\\arxiv_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+            with open('data/arxiv_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerows(res)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
         abstract_model = get_abstract_model(model, abs_settings)
         res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
-        with open('data\\arxiv_' + method + '_bisim.csv', 'w', newline='') as file:
+        with open('data/arxiv_' + method + '_bisim.csv', 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerows(res)
 
@@ -531,14 +531,14 @@ def cora_setup():
     print_dataset_info(dataset)
 
     rng = np.random.default_rng(seed=42)
-    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=50).tolist()
+    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=2).tolist()
 
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         for frac in [0., 0.001, 0.005, 0.01, 0.05]:
             print("Running experiments with frac: {}".format(frac))
@@ -546,16 +546,16 @@ def cora_setup():
             abstract_model = get_abstract_model(model, abs_settings)
             res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
 
-            with open('data\cora_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+            with open('data/cora_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerows(res)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
         abstract_model = get_abstract_model(model, abs_settings)
         res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
-        with open('data\cora_' + method + '_bisim.csv', 'w', newline='') as file:
+        with open('data/cora_' + method + '_bisim.csv', 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerows(res)
 
@@ -572,7 +572,7 @@ def enzymes_setup():
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         for frac in [0., 0.001, 0.005, 0.01, 0.05]:
             print("Running experiments with frac: {}".format(frac))
@@ -580,7 +580,7 @@ def enzymes_setup():
             abstract_model = get_abstract_model(model, abs_settings)
             res = run_graph_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-            with open('data\enzymes_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+            with open('data/enzymes_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerows(res)
 
@@ -597,7 +597,7 @@ def proteins_setup():
 
     train_or_load_weights(dataset, model, epochs=200, patience=10, learning_rate=1e-2, retrain=False)
 
-    for method in ['ibp', 'ibp+crown', 'crown', 'alpha-crown']:
+    for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
         for frac in [0., 0.001, 0.005, 0.01, 0.05]:
             print("Running experiments with frac: {}".format(frac))
@@ -605,7 +605,7 @@ def proteins_setup():
             abstract_model = get_abstract_model(model, abs_settings)
             res = run_graph_task(model, abstract_model, dataset, abs_settings, repeats=50)
 
-            with open('data\proteins_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
+            with open('data/proteins_' + method + '_' + str(frac).replace('.', '') + '.csv', 'w', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerows(res)
 
@@ -613,23 +613,23 @@ def proteins_setup():
 if __name__ == '__main__':
     os.makedirs('data', exist_ok=True)
 
-    # 1. Is CUDA available at all?
-    print(torch.cuda.is_available())  # True if PyTorch can see your GPU
-
-    # 2. How many GPUs are visible?
-    print(torch.cuda.device_count())  # e.g. 1
-
-    # 3. Which GPU is currently active?
-    print(torch.cuda.current_device())  # e.g. 0
-
-    # 4. What’s the GPU name?
-    print(torch.cuda.get_device_name(0))  # e.g. "NVIDIA GeForce RTX 3080"
+    # # 1. Is CUDA available at all?
+    # print(torch.cuda.is_available())  # True if PyTorch can see your GPU
+    #
+    # # 2. How many GPUs are visible?
+    # print(torch.cuda.device_count())  # e.g. 1
+    #
+    # # 3. Which GPU is currently active?
+    # print(torch.cuda.current_device())  # e.g. 0
+    #
+    # # 4. What’s the GPU name?
+    # print(torch.cuda.get_device_name(0))  # e.g. "NVIDIA GeForce RTX 3080"
 
 
     # figure_setup()
     # for _ in range(1):
     # debug_setup()
     # arxiv_setup()
-    # cora_setup()
+    cora_setup()
     # enzymes_setup()
     # proteins_setup()
