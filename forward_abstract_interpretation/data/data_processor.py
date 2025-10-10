@@ -1,7 +1,9 @@
 import pandas as pd
 from pathlib import Path
+import os
 
 folder = Path('.')
+os.makedirs('processed_data', exist_ok=True)
 
 
 for file in folder.glob('*.csv'):
@@ -31,7 +33,7 @@ for file in folder.glob('*.csv'):
         # Add it to the DataFrame
         df['Cumulative Outcome'] = cumulative_percentage
 
-        df.to_csv(file.stem + '_proc' + file.suffix, index=False)
+        df.to_csv('processed_data/' + file.stem + '_proc' + file.suffix, index=False)
     else:
         # Load the CSV file
         headers = ['Outcome', 'Running Time']
@@ -56,4 +58,4 @@ for file in folder.glob('*.csv'):
         # Add it to the DataFrame
         df['Cumulative Outcome'] = cumulative_percentage
 
-        df.to_csv(file.stem + '_proc' + file.suffix, index=False)
+        df.to_csv('processed_data/' + file.stem + '_proc' + file.suffix, index=False)
