@@ -7,9 +7,12 @@ import numpy as np
 from functools import reduce
 
 import torch
+from libmg import MGExplainer, SingleGraphLoader
 from scipy.sparse import coo_matrix
 from spektral.data import Graph
 from spektral.utils import normalized_adjacency, degree_power
+from tqdm import tqdm
+import tensorflow as tf
 
 from forward_abstract_interpretation import lirpa_domain
 from forward_abstract_interpretation.spanning_tree import generate_uncertain_edge_set
@@ -154,6 +157,9 @@ class AbstractionSettings:
     def abstract(self, graph):
         return self.graph_abstraction.abstract(graph, node_delta=self.node_delta, edge_delta=self.edge_delta)
 
+    def abstract_node(self, graph, model, node, graph_tf):
+        return self.graph_abstraction.abstract_node(graph, node_delta=self.node_delta, edge_delta=self.edge_delta, model=model, node=node, graph_tf=graph_tf)
+
     def concretize(self, abs_lb, abs_ub):
         return self.graph_abstraction.concretize(abs_lb, abs_ub)
 
@@ -214,6 +220,61 @@ class EdgeAbstraction(GraphAbstraction):
         self.optimized_gcn = optimized_gcn
 
 
+    def abstract_node(self, graph, node_delta, edge_delta, model, node, graph_tf):
+        conc_x, conc_a, conc_e = graph_tf
+        # Generate cut graph
+        new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
+        tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
+        conc_graph_n_nodes = new_graph.n_nodes
+
+        node_list = sorted(list(set(new_graph.a.row.tolist())))
+        mapping = lambda xx: node_list.index(xx)
+        mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
+        new_graph.a = mapped_a
+
+        # Regenerate uncertain edge set after cut
+        self.generate_uncertain_edge_set(new_graph.a)
+        self.uncertain_edges = {(node_list[i], node_list[j]) for (i, j) in self.uncertain_edges}
+
+        (x, a, (e_lb, e_ub)), y = edge_abstraction(graph, self.uncertain_edges, self.add_missing_edges, self.edge_label_generator)
+
+        cut_low = MGExplainer(model).explain(node, (conc_x, conc_a, tf.convert_to_tensor(e_lb)), None, False)
+        cut_high = MGExplainer(model).explain(node, (conc_x, conc_a, tf.convert_to_tensor(e_ub)), None, False)
+
+        x = new_graph.x
+        a  = new_graph.a
+        e_lb = cut_low.e
+        e_ub = cut_high.e
+
+        abs_x = lirpa_domain.abstract_x(x, node_delta)
+        abs_a = lirpa_domain.abstract_adj(a)
+        abs_e = lirpa_domain.abstract_e(np.zeros_like(e_lb), delta=edge_delta, x_L=e_lb, x_U=e_ub)
+        abs_graph = abs_x, abs_a, abs_e
+        ####################
+        if self.optimized_gcn:
+            new_a_low = deepcopy(a)
+            new_a_high = deepcopy(a)
+            new_a_low.data = np.squeeze(e_lb,axis=-1) - edge_delta
+            new_a_high.data = np.squeeze(e_ub, axis=-1) + edge_delta
+            unrolled_edge_status = abs_a[0][2].numpy()
+
+            # edge abstraction
+            new_a_low.data[unrolled_edge_status < 0] = np.clip(new_a_low.data[unrolled_edge_status < 0], a_max=0, a_min=None)
+            new_a_high.data[unrolled_edge_status < 0] = np.clip(new_a_high.data[unrolled_edge_status < 0], a_min=0, a_max=None)
+
+            e_low = np.expand_dims(new_a_low.todense(), axis=0)
+            e_high = np.expand_dims(new_a_high.todense(), axis=0)
+            e = np.zeros_like(e_low)
+            abs_e = lirpa_domain.abstract_e(e, x_L=e_low, x_U=e_high)
+
+            edge_status = torch.zeros(a.shape).unsqueeze(0)
+            edge_status[0][abs_a[0][0], abs_a[0][1]] = abs_a[0][2].float()
+
+            abs_graph = abs_graph[0], edge_status, abs_e
+        ###################
+        return abs_graph, mapping, conc_graph_n_nodes
+
+
     def abstract(self, graph, node_delta, edge_delta):
         (x, a, (e_lb, e_ub)), y = edge_abstraction(graph, self.uncertain_edges, self.add_missing_edges, self.edge_label_generator)
         abs_x = lirpa_domain.abstract_x(x, node_delta)
@@ -226,7 +287,7 @@ class EdgeAbstraction(GraphAbstraction):
             new_a_high = deepcopy(a)
             new_a_low.data = np.squeeze(e_lb,axis=-1) - edge_delta
             new_a_high.data = np.squeeze(e_ub, axis=-1) + edge_delta
-            unrolled_edge_status = abs_a[0][2]
+            unrolled_edge_status = abs_a[0][2].numpy()
 
             # edge abstraction
             new_a_low.data[unrolled_edge_status < 0] = np.clip(new_a_low.data[unrolled_edge_status < 0], a_max=0, a_min=None)
@@ -260,6 +321,38 @@ class BisimAbstraction(GraphAbstraction):
         self.direction = direction
         self.bisim_map = None
         self.optimized_gcn = optimized_gcn
+
+    def abstract_node(self, graph, node_delta, edge_delta, model, node, graph_tf):
+        conc_x, conc_a, conc_e = graph_tf
+        # Generate cut graph
+        new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
+        tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
+        conc_graph_n_nodes = new_graph.n_nodes
+
+        node_list = sorted(list(set(new_graph.a.row.tolist())))
+        mapping = lambda xx: node_list.index(xx)
+        mapped_a = coo_matrix((new_graph.a.data, (np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
+        new_graph.a = mapped_a
+
+        bisim_map, ((abs_x_lb, abs_x_ub), abs_a, abs_e), y = bisim_abstraction(new_graph, self.direction)
+        self.bisim_map = bisim_map
+        abs_graph = lirpa_domain.abstract_x(np.zeros_like(abs_x_lb), delta=node_delta, x_L=abs_x_lb, x_U=abs_x_ub), lirpa_domain.abstract_adj(abs_a), lirpa_domain.abstract_e(abs_e, edge_delta)
+        ####################
+        if self.optimized_gcn:
+            new_a_low = deepcopy(abs_a)
+            new_a_high = deepcopy(abs_a)
+            new_a_low.data = np.squeeze(abs_e, axis=-1) - edge_delta
+            new_a_high.data = np.squeeze(abs_e, axis=-1) + edge_delta
+            e_low = np.expand_dims(new_a_low.todense(), axis=0)
+            e_high = np.expand_dims(new_a_high.todense(), axis=0)
+            e = np.zeros_like(e_low)
+            abs_e = lirpa_domain.abstract_e(e, x_L=e_low, x_U=e_high)
+            a = abs_graph[1][0]
+            edge_status = torch.zeros_like(abs_e.data)
+            edge_status[0][a[0], a[1]] = a[2].float()
+            abs_graph = abs_graph[0], edge_status, abs_e
+        ###################
+        return abs_graph, mapping, conc_graph_n_nodes
 
     def abstract(self, graph, node_delta, edge_delta):
         bisim_map, ((abs_x_lb, abs_x_ub), abs_a, abs_e), y = bisim_abstraction(graph, self.direction)

@@ -370,28 +370,12 @@ def run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze
     predictions = out[0].numpy()
 
     for node in tqdm(nodes_to_analyze):
-        # Generate cut graph
-        new_graph = MGExplainer(model).explain(node, (conc_x, conc_a, conc_e), None, False)
-        tqdm.write(f"\nAnalyzing graph with {new_graph.n_nodes} nodes")
-        conc_graph_n_nodes = new_graph.n_nodes
-
-        node_list = sorted(list(set(new_graph.a.row.tolist())))
-        mapping = lambda xx: node_list.index(xx)
-        mapped_a = coo_matrix((new_graph.a.data,(np.array(list(map(mapping, new_graph.a.row))), np.array(list(map(mapping, new_graph.a.col))))), shape=(new_graph.n_nodes, new_graph.n_nodes))
-        new_graph.a = mapped_a
-
-        # Regenerate uncertain edge set after cut
-        if isinstance(abs_settings.graph_abstraction, EdgeAbstraction):
-            abs_settings.graph_abstraction.generate_uncertain_edge_set(new_graph.a)
-
         ### Setting up graph
         start_abs = time.perf_counter()
-        abs_x, abs_a, abs_e = abs_settings.abstract(new_graph)
+        (abs_x, abs_a, abs_e), mapping, conc_graph_n_nodes = abs_settings.abstract_node(graph_np, model, node, (conc_x, conc_a, conc_e))
         end_abs = time.perf_counter()
         abs_graph_n_nodes = len(abs_x[0])
         abs_graph_time = end_abs - start_abs
-
-
 
         ### Run
         print("Running analysis")
@@ -414,7 +398,6 @@ def run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze
 
         outcome = check_robustness(abs_prediction_lb[mapping(node)], abs_prediction_ub[mapping(node)], np.argmax(predictions[node]), dataset.n_labels)
         results.append((outcome, elapsed_time) + ((conc_graph_n_nodes, abs_graph_n_nodes, abs_graph_time) if isinstance(abs_settings.graph_abstraction, BisimAbstraction) else ()))
-
     return results
 
 
@@ -506,7 +489,7 @@ def arxiv_setup():
 
     for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
-        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
+        for frac in [0.1]:
             print("Running experiments with frac: {}".format(frac))
             abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
             abstract_model = get_abstract_model(model, abs_settings)
@@ -518,9 +501,9 @@ def arxiv_setup():
 
     for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
-        abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
+        abs_settings = AbstractionSettings(0.001, 0, BisimAbstraction('bw', optimized_gcn=True), method)
         abstract_model = get_abstract_model(model, abs_settings)
-        res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+        res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
         with open('data/arxiv_' + method + '_bisim.csv', 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerows(res)
@@ -531,7 +514,7 @@ def cora_setup():
     print_dataset_info(dataset)
 
     rng = np.random.default_rng(seed=42)
-    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=2).tolist()
+    nodes_to_analyze = rng.integers(0, dataset[0].n_nodes, size=50).tolist()
 
     model = get_gcn(dataset, '<x|+ ; dense[64] ; <x|+ ; dense[64] ; <x|+ ; out')
     model.summary()
@@ -554,7 +537,7 @@ def cora_setup():
         print("Running experiments with methods: {}".format(method))
         abs_settings = AbstractionSettings(0, 0, BisimAbstraction('bw', optimized_gcn=True), method)
         abstract_model = get_abstract_model(model, abs_settings)
-        res = run_node_task(model, abstract_model, dataset, abs_settings, repeats=50)
+        res = run_node_task(model, abstract_model, dataset, abs_settings, nodes_to_analyze)
         with open('data/cora_' + method + '_bisim.csv', 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerows(res)
@@ -613,23 +596,23 @@ def proteins_setup():
 if __name__ == '__main__':
     os.makedirs('data', exist_ok=True)
 
-    # # 1. Is CUDA available at all?
-    # print(torch.cuda.is_available())  # True if PyTorch can see your GPU
-    #
-    # # 2. How many GPUs are visible?
-    # print(torch.cuda.device_count())  # e.g. 1
-    #
-    # # 3. Which GPU is currently active?
-    # print(torch.cuda.current_device())  # e.g. 0
-    #
-    # # 4. What’s the GPU name?
-    # print(torch.cuda.get_device_name(0))  # e.g. "NVIDIA GeForce RTX 3080"
+    # 1. Is CUDA available at all?
+    print(torch.cuda.is_available())  # True if PyTorch can see your GPU
+
+    # 2. How many GPUs are visible?
+    print(torch.cuda.device_count())  # e.g. 1
+
+    # 3. Which GPU is currently active?
+    print(torch.cuda.current_device())  # e.g. 0
+
+    # 4. What’s the GPU name?
+    print(torch.cuda.get_device_name(0))  # e.g. "NVIDIA GeForce RTX 3080"
 
 
     # figure_setup()
     # for _ in range(1):
     # debug_setup()
     # arxiv_setup()
-    cora_setup()
+    # cora_setup()
     # enzymes_setup()
     # proteins_setup()

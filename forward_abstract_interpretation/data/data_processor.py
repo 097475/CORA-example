@@ -21,6 +21,13 @@ for file in folder.glob('*.csv'):
         df['Cumulative Time'] = cumsum
 
 
+        # Compute the cumulative sum of the second column
+        cumsum = df.iloc[:, 4].cumsum()
+
+        # Optional: add it as a new column to the DataFrame
+        df['Cumulative Bisimulation Time'] = cumsum
+
+
         # Create a boolean mask where 'pass' is True
         is_pass = df['Outcome'].eq('Pass')
 
