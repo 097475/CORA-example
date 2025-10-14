@@ -489,7 +489,7 @@ def arxiv_setup():
 
     for method in ['ibp', 'ibp+crown', 'crown']:
         print("Running experiments with methods: {}".format(method))
-        for frac in [0.1]:
+        for frac in [0., 0.001, 0.005, 0.01, 0.05]:
             print("Running experiments with frac: {}".format(frac))
             abs_settings = AbstractionSettings(0.001, 0, EdgeAbstraction(frac, False, edge_label_generator='GCN', optimized_gcn=True), method)
             abstract_model = get_abstract_model(model, abs_settings)
